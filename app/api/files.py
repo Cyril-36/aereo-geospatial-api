@@ -229,7 +229,8 @@ def get_measurements(
             record.id,
         )
 
-    limit = settings.default_page_size if limit is None else limit
+    if limit is None:
+        limit = min(settings.default_page_size, settings.max_page_size)
     if not 1 <= limit <= settings.max_page_size:
         raise ApiError(
             422, "INVALID_PAGINATION", f"limit must be between 1 and {settings.max_page_size}."
@@ -240,13 +241,19 @@ def get_measurements(
     total = db.scalar(
         select(func.count()).select_from(FeatureRecord).where(FeatureRecord.file_id == record.id)
     )
-    features = db.scalars(
-        select(FeatureRecord)
-        .where(FeatureRecord.file_id == record.id)
-        .order_by(FeatureRecord.index)
-        .limit(limit)
-        .offset(offset)
-    ).all()
+    # Past the end there is nothing to fetch; this also keeps offsets beyond SQLite's
+    # 64-bit integer range out of the query.
+    features = (
+        db.scalars(
+            select(FeatureRecord)
+            .where(FeatureRecord.file_id == record.id)
+            .order_by(FeatureRecord.index)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        if offset < total
+        else []
+    )
     returned = len(features)
     return MeasurementsPage(
         file_id=record.id,

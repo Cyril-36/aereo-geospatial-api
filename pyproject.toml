@@ -1,0 +1,40 @@
+[project]
+name = "aereo-geospatial-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "defusedxml>=0.7.1",
+    "fastapi>=0.142.4",
+    "fiona>=1.10.1",
+    "pydantic-settings>=2.15.0",
+    "pyproj>=3.8.0",
+    "python-multipart>=0.0.32",
+    "shapely>=2.2.0",
+    "sqlalchemy>=2",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+ignore = ["B008"]  # FastAPI's File(...)/Depends(...) defaults
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S108"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -90,7 +90,8 @@ def test_phase1_database_is_served_after_upgrade(tmp_path):
 
     connection = sqlite3.connect(settings.data_dir / "aereo.db")
     assert connection.execute("SELECT count(*) FROM features").fetchone()[0] == 7 + 1
-    assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,), (2,), (3,)]
+    versions = connection.execute("SELECT version FROM schema_migrations").fetchall()
+    assert versions == [(1,), (2,), (3,)]
     connection.close()
 
 

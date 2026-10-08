@@ -15,9 +15,10 @@ from app.errors import ApiError, error_body
 
 
 class BodySizeLimitMiddleware:
-    def __init__(self, app: ASGIApp, max_body_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, max_body_bytes: int, file_limit_bytes: int) -> None:
         self.app = app
-        self.max_body_bytes = max_body_bytes
+        self.max_body_bytes = max_body_bytes  # file limit + multipart framing allowance
+        self.file_limit_bytes = file_limit_bytes  # the limit users are told about
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
@@ -26,7 +27,9 @@ class BodySizeLimitMiddleware:
 
         limit = self.max_body_bytes
         too_large = ApiError(
-            413, "UPLOAD_TOO_LARGE", f"Request body exceeds the {limit}-byte upload limit."
+            413,
+            "UPLOAD_TOO_LARGE",
+            f"Upload exceeds the {self.file_limit_bytes}-byte file size limit.",
         )
 
         for name, value in scope.get("headers", []):

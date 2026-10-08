@@ -160,6 +160,7 @@ def test_oversized_upload_is_413_and_nothing_stored(tmp_path):
         response = upload(client, "huge.kml", b"x" * 50_000)
         assert response.status_code == 413
         assert response.json()["error"]["code"] == "UPLOAD_TOO_LARGE"
+        assert "1000-byte file size limit" in response.json()["error"]["message"]
         assert list(settings.upload_dir.iterdir()) == []
 
 
@@ -189,7 +190,7 @@ def test_body_guard_counts_streamed_bytes_without_content_length():
     async def send(message):
         sent.append(message)
 
-    guard = BodySizeLimitMiddleware(app, max_body_bytes=1000)
+    guard = BodySizeLimitMiddleware(app, max_body_bytes=1000, file_limit_bytes=900)
     scope = {"type": "http", "method": "POST", "headers": []}
     asyncio.run(guard(scope, receive, send))
     assert sent[0]["status"] == 413

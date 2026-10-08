@@ -57,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         BodySizeLimitMiddleware,
         max_body_bytes=settings.max_upload_bytes + settings.multipart_overhead_bytes,
+        file_limit_bytes=settings.max_upload_bytes,
     )
     install_error_handlers(app)
     app.include_router(files_router)

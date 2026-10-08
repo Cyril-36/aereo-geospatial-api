@@ -11,3 +11,6 @@ data/
 *.db-shm
 .env
 .DS_Store
+.claude/
+test-results/
+playwright-report/

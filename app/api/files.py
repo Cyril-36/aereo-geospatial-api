@@ -59,7 +59,33 @@ def _validated_source_crs(value: str | None, max_chars: int) -> str | None:
     return value.strip()
 
 
-@router.post("/files/", status_code=201, response_model=FileInfo)
+SINGLE_FORM_FIELDS = ("file", "source_crs")
+
+
+async def reject_duplicate_form_fields(request: Request) -> None:
+    """Reject a repeated ``file`` or ``source_crs`` field instead of silently using the last.
+
+    FastAPI has already parsed the multipart body to bind the parameters; ``request.form()``
+    returns that same cached FormData, so nothing is read or parsed twice. This runs before
+    the endpoint, so nothing has been stored yet.
+    """
+    form = await request.form()
+    for name in SINGLE_FORM_FIELDS:
+        count = len(form.getlist(name))
+        if count > 1:
+            raise ApiError(
+                422,
+                "DUPLICATE_FORM_FIELD",
+                f"Form field '{name}' was sent {count} times; send it at most once.",
+            )
+
+
+@router.post(
+    "/files/",
+    status_code=201,
+    response_model=FileInfo,
+    dependencies=[Depends(reject_duplicate_form_fields)],
+)
 def upload_file(
     request: Request,
     response: Response,

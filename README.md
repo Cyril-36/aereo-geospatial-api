@@ -102,6 +102,10 @@ Multipart form fields:
   file has none (for example, a Shapefile without `.prj`). If the file declares a different valid CRS,
   the upload fails with `422 CRS_CONFLICT`; it never overrides a declared CRS.
 
+Each field may be sent at most once. A repeated `file` or `source_crs`, even with an identical
+value, is rejected with `422 DUPLICATE_FORM_FIELD` before anything is stored; it is never resolved
+by silently using one of the values.
+
 Processing is synchronous: the response arrives once the file has been read, measured and stored.
 
 ```bash
@@ -189,7 +193,9 @@ Returns the same object as the upload response: filename, format, size, status, 
 ### `GET /api/files/{id}/measurements/`
 
 Query parameters: `limit` (default 100, maximum 1,000) and `offset` (default 0). Features are always
-ordered by their position in the source file (`index`). `pagination.next_offset` is `null` on the last page.
+ordered by their position in the source file (`index`). `pagination.next_offset` is `null` on the last page,
+and an offset past the end returns an empty page. Repeating `limit` or `offset` is rejected with
+`422 DUPLICATE_QUERY_PARAMETER`.
 
 ```bash
 curl "http://127.0.0.1:8000/api/files/b6807c2f-0cb5-4880-a9ae-d4038e8d6b68/measurements/?limit=1"
@@ -250,7 +256,8 @@ How `geometry` is labelled:
 returned at full floating-point precision, and responses never contain `NaN` or `Infinity`.
 
 KML features keep their `name`, `description`, `ExtendedData` and `SchemaData` values in `properties`, and
-their folder path in `folder_path`. In the sample survey file:
+their folder path in `folder_path`. A Placemark with several geometries (KML allows one) keeps all of them
+as one multi-geometry, with a `MULTIPLE_GEOMETRIES` warning. In the sample survey file:
 
 ```json
 {"index": 0, "source_id": "field-1", "geometry_type": "Polygon",    "status": "MEASURED",       "area_m2": 48012.3461844588, "length_m": null,               "folder_path": ["Sample site survey", "Block A"]}
@@ -267,9 +274,9 @@ All errors use one envelope: `{"error": {"code": "...", "message": "...", "file_
 |---|---|---|
 | 404 | Unknown file id | `FILE_NOT_FOUND` |
 | 409 | Measurements requested for a file that is not `COMPLETED` | `FILE_NOT_READY`, `FILE_FAILED`, `MEASUREMENTS_UNAVAILABLE` |
-| 413 | Upload, archive, feature or vertex limit exceeded | `UPLOAD_TOO_LARGE`, `EXPANDED_SIZE_EXCEEDED`, `TOO_MANY_FEATURES` |
+| 413 | Upload, archive, form, feature or vertex limit exceeded | `UPLOAD_TOO_LARGE`, `EXPANDED_SIZE_EXCEEDED`, `FORM_LIMIT_EXCEEDED`, `TOO_MANY_FEATURES` |
 | 415 | Unsupported format | `UNSUPPORTED_FORMAT`, `KMZ_UNSUPPORTED` |
-| 422 | Invalid input or dataset | `EMPTY_FILE`, `INVALID_ZIP`, `MALFORMED_DATASET`, `MULTIPLE_DATASETS_UNSUPPORTED`, `MISSING_SHAPEFILE_COMPONENT`, `INVALID_KML`, `UNSAFE_XML`, `CRS_CONFLICT`, `INVALID_SOURCE_CRS`, `INVALID_PAGINATION` |
+| 422 | Invalid input or dataset | `EMPTY_FILE`, `INVALID_ZIP`, `MALFORMED_DATASET`, `MULTIPLE_DATASETS_UNSUPPORTED`, `MISSING_SHAPEFILE_COMPONENT`, `INVALID_KML`, `UNSAFE_XML`, `CRS_CONFLICT`, `INVALID_SOURCE_CRS`, `DUPLICATE_FORM_FIELD`, `DUPLICATE_QUERY_PARAMETER`, `INVALID_PAGINATION`, `MALFORMED_REQUEST` |
 | 500 | Unexpected error | `INTERNAL_ERROR`: no internal details, only a request id that matches the server log |
 
 ## Architecture
@@ -436,7 +443,7 @@ Every non-`MEASURED` feature has a `reason_code` and a human-readable `reason`.
 uv run pytest
 ```
 
-The suite (292 tests) uses real files throughout: Shapefiles written with Fiona, real KML documents, and
+The suite (317 tests) uses real files throughout: Shapefiles written with Fiona, real KML documents, and
 a database dump written by the first release for the migration tests. Measured values are compared with
 independent references rather than with the code under test:
 

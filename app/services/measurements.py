@@ -53,6 +53,11 @@ DEPTH = {
     "MultiPolygon": 3,
 }
 RANGE_EPSILON = 1e-9
+# A projected coordinate inside its projection's domain survives inverse-then-forward
+# projection to well below a millimetre (observed: <= 2e-7 m on UTM, State Plane feet, Web
+# Mercator, polar stereographic, Albers, Mollweide); one outside it (e.g. in a conic's gap)
+# comes back kilometres away.
+DOMAIN_TOLERANCE_M = 0.001
 
 
 class Status:
@@ -230,6 +235,7 @@ def _measure(
 
     # 7. Original vertices to WGS84 (also the geometry reported back).
     wgs84 = _to_wgs84(source, resolved)
+    _check_projection_domain(source, resolved)
     result.wgs84_geometry = _geojson(wgs84)
 
     # 8. Extent guards, then bounded densification.
@@ -247,7 +253,9 @@ def _measure(
         step = limits.max_segment_m / resolved.metres_per_unit
         inserts = _plan_inserts(source, _planar_lengths, step)
         _check_capacity(inserts, original_vertices, limits, budget)
-        densified = _to_wgs84(_densify(source, inserts, _planar_points), resolved)
+        densified_source = _densify(source, inserts, _planar_points)
+        densified = _to_wgs84(densified_source, resolved)
+        _check_projection_domain(densified_source, resolved)
     # Densified edges can leave the region the original vertices span: a straight line in a
     # projected CRS whose seam is not at 180° (e.g. EPSG:3832) can run the long way round the
     # globe. The extent guards are therefore repeated on the densified geometry.
@@ -374,6 +382,31 @@ def _apply(geometry: BaseGeometry, transformer: Transformer) -> BaseGeometry:
         return np.column_stack([x, y])
 
     return shapely.transform(geometry, convert)
+
+
+def _check_projection_domain(geometry: BaseGeometry, resolved: ResolvedCrs) -> None:
+    """Projected sources: every coordinate must round-trip through the inverse projection.
+
+    PROJ's inverse returns a longitude/latitude even for points no forward projection can
+    produce (a conic's gap, beyond Mercator's pole); such points would be measured as if real.
+    """
+    if resolved.to_geodetic is None:
+        return
+    xy = shapely.get_coordinates(geometry)
+    try:
+        lon, lat = resolved.to_geodetic.transform(xy[:, 0], xy[:, 1], errcheck=False)
+        x, y = resolved.to_geodetic.transform(lon, lat, direction="INVERSE", errcheck=False)
+    except ProjError as exc:
+        raise _Stop(Status.TRANSFORM_FAILED, "TRANSFORM_ERROR", str(exc)) from exc
+    with np.errstate(invalid="ignore", over="ignore"):
+        error = np.hypot(np.asarray(x) - xy[:, 0], np.asarray(y) - xy[:, 1])
+    if not (np.isfinite(error) & (error <= DOMAIN_TOLERANCE_M / resolved.metres_per_unit)).all():
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "OUTSIDE_PROJECTION_DOMAIN",
+            "Some coordinates (or points on straight edges between them) lie outside the "
+            "projection's valid domain.",
+        )
 
 
 def _to_wgs84(geometry: BaseGeometry, resolved: ResolvedCrs) -> BaseGeometry:

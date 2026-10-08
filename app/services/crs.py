@@ -112,6 +112,9 @@ class ResolvedCrs:
     transformation: Transformation | None = None
     is_geographic: bool = False
     metres_per_unit: float | None = None  # horizontal axis unit, for projected sources
+    # Projected sources only: inverse projection to the CRS's own geodetic CRS (no datum
+    # change), used to check that coordinates lie inside the projection's valid domain.
+    to_geodetic: Transformer | None = None
     warnings: list[dict[str, str]] = field(default_factory=list)
 
 
@@ -188,5 +191,8 @@ def resolve(source: SourceCrs) -> ResolvedCrs:
         ),
         is_geographic=crs.is_geographic,
         metres_per_unit=None if crs.is_geographic else crs.axis_info[0].unit_conversion_factor,
+        to_geodetic=None
+        if crs.is_geographic
+        else Transformer.from_crs(crs, crs.geodetic_crs, always_xy=True),
         warnings=warnings,
     )

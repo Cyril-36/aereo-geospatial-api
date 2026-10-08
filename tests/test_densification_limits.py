@@ -53,12 +53,19 @@ def test_infinite_count_is_refused(capacity_calls):
 
 
 def test_extreme_web_mercator_line(capacity_calls):
+    # y = 1e24 converts to latitude 90°, which passes the WGS84 range check, but no latitude
+    # projects back to it: it is outside Web Mercator's domain and is refused before
+    # densification. (Without the domain guard it reached the count, needing > 2**63 inserts;
+    # the count path is covered with valid coordinates by the tiny-step test above.)
     coords = [(0.0, 0.0), (0.0, 1e24)]
     wgs84 = [Transformer.from_crs(3857, 4326, always_xy=True).transform(*c) for c in coords]
-    assert wgs84 == [(0.0, 0.0), (0.0, 90.0)]  # passes the WGS84 range check
+    assert wgs84 == [(0.0, 0.0), (0.0, 90.0)]
     result = run([feature(line(coords))], source("EPSG:3857"))[0]
-    assert len(capacity_calls) == 1 and capacity_calls[0][0][0] > INT64_MAX
-    assert (result.status, result.reason_code) == (Status.UNSUPPORTED_EXTENT, "DENSIFICATION_LIMIT")
+    assert capacity_calls == []
+    assert (result.status, result.reason_code) == (
+        Status.TRANSFORM_FAILED,
+        "OUTSIDE_PROJECTION_DOMAIN",
+    )
     assert result.generated_vertices == 0
 
 
@@ -68,7 +75,12 @@ def test_non_finite_segment_length():
     assert wgs84 == [(0.0, -90.0), (0.0, 90.0)]
     assert math.isinf(math.hypot(0.0, 1e308 - -1e308))
     result = run([feature(line(coords))], source("EPSG:3857"))[0]
-    assert (result.status, result.reason_code) == (Status.UNSUPPORTED_EXTENT, "NON_FINITE_LENGTH")
+    # Also outside the projection's domain, which is now checked first; the non-finite-length
+    # guard itself is exercised directly below.
+    assert (result.status, result.reason_code) == (
+        Status.TRANSFORM_FAILED,
+        "OUTSIDE_PROJECTION_DOMAIN",
+    )
 
 
 def test_plan_rejects_non_finite_lengths_directly():

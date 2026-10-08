@@ -344,8 +344,11 @@ File-processing flow:
    Anything else becomes `TRANSFORM_FAILED` (`NON_FINITE_MEASUREMENT` or `NEGATIVE_MEASUREMENT`). The
    storage layer also refuses any result whose numbers contradict its status.
 
-LAEA is equal-area, not distance-preserving. Areas are accurate for any feature size, given
-densification: a 10° × 10° polygon agrees with the geodesic area to 0.0007 %. Lengths are approximate.
+LAEA is equal-area, not distance-preserving. Within the supported extent (features that do not cross
+the 180° meridian and stay within 90° of arc of their centre) and with edges densified to 50 km, area
+closely matches the geodesic reference. In testing, a 10° × 10° polygon agreed to 0.0007 %. This
+assumes edges are geodesics for geographic sources and straight lines in the source CRS for projected
+sources, and it relies on the source CRS and datum transformation being correct. Lengths are approximate.
 For local features the error is negligible (about 0.004 % at 100 km from the centre). Lines spanning
 hundreds of kilometres can be off by about 0.1 % or more, which the geodesic check flags.
 

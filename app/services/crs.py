@@ -131,7 +131,8 @@ def resolve(source: SourceCrs) -> ResolvedCrs:
         )
 
     crs = CRS.from_wkt(source.wkt)
-    if crs.is_geocentric or not (crs.is_geographic or crs.is_projected):
+    # Geocentric, engineering, vertical, ... : not horizontal coordinates.
+    if not (crs.is_geographic or crs.is_projected):
         return ResolvedCrs(
             source,
             "CRS_UNSUPPORTED",

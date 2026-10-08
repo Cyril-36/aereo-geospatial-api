@@ -392,3 +392,94 @@ def test_valid_upload_after_failures_is_unaffected(client, tmp_path):
         )
     )
     assert (info["status"], info["counts"]) == ("COMPLETED", {"MEASURED": 1})
+
+
+# Numerical integrity through the API ------------------------------------------------------
+
+
+def two_polygons_kml() -> bytes:
+    ring = "77,13 77.01,13 77.01,13.01 77,13.01 77,13"
+    shifted = "77.02,13 77.03,13 77.03,13.01 77.02,13.01 77.02,13"
+    marks = "".join(
+        f'<Placemark id="{name}"><Polygon><outerBoundaryIs><LinearRing><coordinates>{c}'
+        "</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>"
+        for name, c in (("a", ring), ("b", shifted))
+    )
+    return f"{KML_HEAD}{marks}</Document></kml>".encode()
+
+
+def persisted_status_counts(app, file_id: str) -> dict[str, int]:
+    with app.state.session_factory() as session:
+        rows = session.execute(
+            select(FeatureRecord.status, func.count())
+            .where(FeatureRecord.file_id == file_id)
+            .group_by(FeatureRecord.status)
+        ).all()
+    return dict(rows)
+
+
+def test_injected_non_finite_measurement_is_an_explicit_feature_failure(client, monkeypatch):
+    from app.services import measurements
+
+    real = measurements._geodesic_area
+    calls = []
+
+    def nan_first(geometry):
+        calls.append(1)
+        return float("nan") if len(calls) == 1 else real(geometry)
+
+    monkeypatch.setattr(measurements, "_geodesic_area", nan_first)
+    response = upload(client, "two.kml", two_polygons_kml())
+    assert response.status_code == 201
+    info = strict_json(response)
+    assert info["status"] == "COMPLETED"
+    assert info["counts"] == {"MEASURED": 1, "TRANSFORM_FAILED": 1}
+    assert persisted_status_counts(client.app, info["id"]) == info["counts"]
+    failed, ok = strict_json(client.get(f"/api/files/{info['id']}/measurements/"))["features"]
+    assert (failed["status"], failed["reason_code"]) == (
+        "TRANSFORM_FAILED",
+        "NON_FINITE_MEASUREMENT",
+    )
+    assert (failed["area_m2"], failed["geodesic_reference"]) == (None, None)
+    assert ok["status"] == "MEASURED" and ok["area_m2"] > 0
+
+
+def test_inconsistent_result_is_never_stored(raw_client, monkeypatch):
+    from app.services import processor
+
+    real = processor.measure_dataset
+
+    def corrupt(*args, **kwargs):
+        measured = real(*args, **kwargs)
+        measured.features[0].area_m2 = None  # MEASURED without its metric
+        return measured
+
+    monkeypatch.setattr(processor, "measure_dataset", corrupt)
+    error = assert_envelope(
+        upload(raw_client, "two.kml", two_polygons_kml()), 500, "INTERNAL_ERROR"
+    )
+    assert "request id" in error["message"]
+    record = only_file(raw_client.app)
+    _, features = stored(raw_client.app, record.id)
+    assert (record.status, record.error_code, features) == ("FAILED", "INCONSISTENT_RESULT", 0)
+    assert record.status_counts is None
+    assert_envelope(raw_client.get(f"/api/files/{record.id}/measurements/"), 409, "FILE_FAILED")
+
+
+def test_counts_always_match_persisted_statuses(client):
+    kml = (
+        f"{KML_HEAD}<Placemark><Point><coordinates>77,13</coordinates></Point></Placemark>"
+        "<Placemark><LineString><coordinates>77,13 77.01,13</coordinates></LineString></Placemark>"
+        "<Placemark><Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 1,1 1,0 0,1 0,0"
+        "</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>"
+        "<Placemark><LineString><coordinates>179,0 -179,0</coordinates></LineString></Placemark>"
+        "</Document></kml>"
+    ).encode()
+    info = strict_json(upload(client, "mix.kml", kml))
+    assert info["counts"] == {
+        "INVALID_GEOMETRY": 1,
+        "MEASURED": 1,
+        "NOT_APPLICABLE": 1,
+        "UNSUPPORTED_EXTENT": 1,
+    }
+    assert persisted_status_counts(client.app, info["id"]) == info["counts"]

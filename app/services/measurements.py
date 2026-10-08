@@ -14,7 +14,8 @@ Status precedence (the first rule that applies wins):
 6. Source CRS unknown / unusable                     -> UNKNOWN_CRS / CRS_UNSUPPORTED
 7. Conversion to WGS84 fails or leaves the valid range -> TRANSFORM_FAILED
 8. Antimeridian crossing, hemisphere-scale extent, densification budget -> UNSUPPORTED_EXTENT
-9. Projection to the local LAEA fails                -> TRANSFORM_FAILED
+9. Projection to the local LAEA fails, or the calculated value or its geodesic reference
+   is not a finite, non-negative number               -> TRANSFORM_FAILED
 10. Otherwise                                         -> MEASURED
 
 Geometry checks come before CRS checks because they need no CRS: an invalid polygon is reported
@@ -286,6 +287,7 @@ def _measure(
     else:
         value, reference = projected.length, _geodesic_length(densified)
         floor = limits.length_floor_m
+    _check_measured_values(value, reference)
     budget.commit(generated)
     result.generated_vertices = generated  # points actually inserted
     result.status = Status.MEASURED
@@ -295,15 +297,41 @@ def _measure(
         result.area_m2, result.geodesic_area_m2 = value, reference
     else:
         result.length_m, result.geodesic_length_m = value, reference
+    difference = abs(value - reference)
     if reference > 0:
-        result.relative_difference = abs(value - reference) / reference
-    if abs(value - reference) > max(limits.relative_tolerance * reference, floor):
+        result.relative_difference = difference / reference
+    # Relative tolerance with an absolute floor. A zero reference has no meaningful
+    # percentage, so only the absolute difference is reported for it.
+    if difference > max(limits.relative_tolerance * reference, floor):
+        unit = "m²" if kind in AREA_TYPES else "m"
+        size = (
+            f"{100 * difference / reference:.3f}%"
+            if reference > 0
+            else f"{difference:.6g} {unit} (the reference is zero)"
+        )
         result.warnings.append(
             warning(
                 "GEODESIC_DISAGREEMENT",
-                f"Projected value differs from the geodesic reference by "
-                f"{100 * abs(value - reference) / reference:.3f}%; treat it as approximate.",
+                f"Projected value differs from the geodesic reference by {size}; "
+                "treat it as approximate.",
             )
+        )
+
+
+def _check_measured_values(value: float, reference: float) -> None:
+    """A measurement and its geodesic reference must be finite and non-negative; zero is a
+    valid calculated value. Checked before anything is charged or recorded."""
+    if not (math.isfinite(value) and math.isfinite(reference)):
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "NON_FINITE_MEASUREMENT",
+            "The calculated value or its geodesic reference is not a finite number.",
+        )
+    if value < 0 or reference < 0:
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "NEGATIVE_MEASUREMENT",
+            "The calculated value or its geodesic reference is negative.",
         )
 
 

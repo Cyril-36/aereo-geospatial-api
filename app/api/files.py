@@ -9,7 +9,12 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.errors import ApiError, IngestionError
 from app.models import FeatureRecord, FileRecord, FileStatus, utcnow
-from app.results import apply_results, geodesic_reference, geometry_out
+from app.results import (
+    InconsistentResultError,
+    apply_results,
+    geodesic_reference,
+    geometry_out,
+)
 from app.schemas import FeatureMeasurement, FileInfo, MeasurementsPage, Message, Pagination
 from app.services.crs import parse_override
 from app.services.processor import process
@@ -114,6 +119,11 @@ def upload_file(
         record.status = FileStatus.COMPLETED
         record.processed_at = utcnow()
         db.commit()
+    except InconsistentResultError:
+        # Fail closed: an internally contradictory result is never stored.
+        logger.exception("file %s: inconsistent measurement result", file_id)
+        _mark_failed(db, record, "INCONSISTENT_RESULT", "Measurement results were inconsistent.")
+        raise
     except Exception:
         logger.exception("file %s: storing results failed", file_id)
         _mark_failed(db, record, "PERSISTENCE_FAILED", "Results could not be stored.")

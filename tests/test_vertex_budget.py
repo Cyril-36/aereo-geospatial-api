@@ -1,5 +1,7 @@
 """The file-wide vertex budget is checked before densifying but charged only on success."""
 
+import math
+
 import numpy as np
 import pytest
 
@@ -89,3 +91,98 @@ def test_failure_in_final_calculation_charges_nothing(monkeypatch):
         )
     assert budget.remaining == 100
     assert result.status == "" and result.generated_vertices == 0
+
+
+# --- Numerical validation of calculated values ------------------------------------------
+
+
+def laea_scaled(monkeypatch, factor, times=None):
+    """Scale coordinates after projection to the local LAEA (for the first ``times`` features,
+    or all): finite coordinates whose area or length overflow, as an injected numerical
+    failure."""
+    real_apply = m._apply
+    applied = []
+
+    def scaled(geometry, transformer):
+        out = real_apply(geometry, transformer)
+        if "proj=laea" in transformer.definition and (times is None or len(applied) < times):
+            applied.append(1)
+            return m.shapely.transform(out, lambda xy: xy * factor)
+        return out
+
+    monkeypatch.setattr(m, "_apply", scaled)
+
+
+POLYGON = {
+    "type": "Polygon",
+    "coordinates": [[[77, 13], [77.01, 13], [77.01, 13.01], [77, 13.01], [77, 13]]],
+}
+
+
+def test_overflowing_area_is_transform_failed_and_later_features_still_measure(monkeypatch):
+    laea_scaled(monkeypatch, 1e200, times=1)  # finite coordinates (~1e203); the area overflows
+    first, second = run(
+        [feature(POLYGON, 0), feature(line([(1, 0), (1, 10)]), 1)],
+        kml_crs(),
+        MeasurementLimits(max_total_vertices=5 + 2 + 22),  # room for the line's 22 inserts
+    )
+    assert (first.status, first.reason_code) == (Status.TRANSFORM_FAILED, "NON_FINITE_MEASUREMENT")
+    assert (first.area_m2, first.geodesic_area_m2, first.generated_vertices) == (None, None, 0)
+    assert second.status == Status.MEASURED and second.generated_vertices == 22
+
+
+@pytest.mark.parametrize(
+    ("target", "value", "code"),
+    [
+        ("_geodesic_area", math.nan, "NON_FINITE_MEASUREMENT"),
+        ("_geodesic_area", math.inf, "NON_FINITE_MEASUREMENT"),
+        ("_geodesic_area", -1.0, "NEGATIVE_MEASUREMENT"),
+    ],
+)
+def test_invalid_reference_is_refused_without_charging_the_budget(monkeypatch, target, value, code):
+    monkeypatch.setattr(m, target, lambda _g: value)
+    budget = VertexBudget(100)
+    result = m.measure_feature(feature(POLYGON), m.resolve(kml_crs()), MeasurementLimits(), budget)
+    assert (result.status, result.reason_code) == (Status.TRANSFORM_FAILED, code)
+    assert (result.area_m2, result.geodesic_area_m2, result.relative_difference) == (
+        None,
+        None,
+        None,
+    )
+    assert budget.remaining == 100
+
+
+def test_failed_numerical_feature_does_not_block_a_later_valid_feature(monkeypatch):
+    real = m._geodesic_length
+    calls = []
+
+    def nan_once(geometry):
+        calls.append(1)
+        return math.nan if len(calls) == 1 else real(geometry)
+
+    monkeypatch.setattr(m, "_geodesic_length", nan_once)
+    first, second = run(
+        [feature(line([(0, 0), (0, 10)]), 0), feature(line([(1, 0), (1, 10)]), 1)],
+        kml_crs(),
+        MeasurementLimits(max_total_vertices=4 + 22),  # room for exactly one line's inserts
+    )
+    assert (first.status, first.reason_code) == (Status.TRANSFORM_FAILED, "NON_FINITE_MEASUREMENT")
+    assert second.status == Status.MEASURED and second.generated_vertices == 22
+
+
+def test_zero_reference_with_non_zero_value_warns_without_a_percentage(monkeypatch):
+    monkeypatch.setattr(m, "_geodesic_length", lambda _g: 0.0)
+    result = run([feature(line([(77, 13), (77.01, 13)]))], kml_crs())[0]
+    assert result.status == Status.MEASURED
+    assert result.geodesic_length_m == 0.0 and result.relative_difference is None
+    (disagreement,) = [w for w in result.warnings if w["code"] == "GEODESIC_DISAGREEMENT"]
+    assert "reference is zero" in disagreement["message"] and "%" not in disagreement["message"]
+
+
+def test_valid_zero_is_measured_as_zero(monkeypatch):
+    laea_scaled(monkeypatch, 0.0)  # collapse the projected geometry to zero length
+    monkeypatch.setattr(m, "_geodesic_length", lambda _g: 0.0)
+    result = run([feature(line([(77, 13), (77.01, 13)]))], kml_crs())[0]
+    assert (result.status, result.length_m, result.geodesic_length_m) == (Status.MEASURED, 0.0, 0.0)
+    assert result.relative_difference is None
+    assert not [w for w in result.warnings if w["code"] == "GEODESIC_DISAGREEMENT"]

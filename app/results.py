@@ -4,7 +4,10 @@ Rules applied here:
 - every extracted feature is stored, including skipped and invalid ones;
 - reader warnings and measurement warnings are both kept, reader warnings first;
 - a measurement is NULL when it was not calculated; 0 is a calculated zero;
-- non-finite floats are never stored or emitted;
+- results are validated before anything is stored (fail closed): a MEASURED feature has
+  exactly its own finite, non-negative metric and geodesic reference, other statuses have
+  none. An inconsistent result raises InconsistentResultError; it is never "fixed" by turning
+  an invalid number into NULL while keeping MEASURED;
 - geometry is labelled EPSG:4326 only when it is the successfully transformed copy, or when
   the source itself is EPSG:4326; otherwise it is the original coordinates, labelled with the
   source CRS, or with null when that CRS is unknown.
@@ -16,11 +19,47 @@ from typing import Any
 
 from app.models import FeatureRecord, FileRecord
 from app.services.crs import WGS84
+from app.services.measurements import AREA_TYPES, LENGTH_TYPES, FeatureMeasurement, Status
 from app.services.processor import ProcessedFile
 
 
-def finite(value: float | None) -> float | None:
-    return value if value is not None and math.isfinite(value) else None
+class InconsistentResultError(RuntimeError):
+    """A measurement result contradicts its own status; nothing may be stored."""
+
+
+def _valid_metric(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def validate_measurement(geometry_type: str | None, result: FeatureMeasurement) -> None:
+    """Raise InconsistentResultError unless the result's numbers agree with its status."""
+    area = (result.area_m2, result.geodesic_area_m2)
+    length = (result.length_m, result.geodesic_length_m)
+    where = f"feature {result.index} ({result.status})"
+    if result.status == Status.MEASURED:
+        if geometry_type in AREA_TYPES:
+            expected, unexpected = area, length
+        elif geometry_type in LENGTH_TYPES:
+            expected, unexpected = length, area
+        else:
+            raise InconsistentResultError(f"{where}: {geometry_type} cannot be measured")
+        if not all(_valid_metric(v) for v in expected):
+            raise InconsistentResultError(f"{where}: metric or reference is not a finite >= 0")
+        if any(v is not None for v in unexpected):
+            raise InconsistentResultError(f"{where}: carries the other geometry kind's metric")
+        if result.relative_difference is not None and not _valid_metric(result.relative_difference):
+            raise InconsistentResultError(f"{where}: invalid relative difference")
+        if not isinstance(result.generated_vertices, int) or result.generated_vertices < 0:
+            raise InconsistentResultError(f"{where}: invalid generated vertex count")
+        return
+    numbers = (*area, *length, result.relative_difference)
+    if any(v is not None for v in numbers) or result.generated_vertices != 0:
+        raise InconsistentResultError(f"{where}: an unmeasured feature carries measurements")
 
 
 def transformation_dict(processed: ProcessedFile) -> dict[str, Any] | None:
@@ -37,6 +76,8 @@ def transformation_dict(processed: ProcessedFile) -> dict[str, Any] | None:
 def apply_results(record: FileRecord, processed: ProcessedFile) -> None:
     """Fill a file record and its feature records from a processed upload (no commit)."""
     dataset, measured = processed.dataset, processed.measured
+    for raw, result in zip(dataset.features, measured.features, strict=True):
+        validate_measurement(raw.geometry_type, result)  # before anything is assigned
     source = measured.crs.source  # the declared CRS, or the caller's override
     transformation = transformation_dict(processed)
 
@@ -63,13 +104,13 @@ def apply_results(record: FileRecord, processed: ProcessedFile) -> None:
             status=result.status,
             reason_code=result.reason_code,
             reason=result.reason,
-            area_m2=finite(result.area_m2),
-            length_m=finite(result.length_m),
+            area_m2=result.area_m2,
+            length_m=result.length_m,
             measurement_method=result.measurement_method,
             measurement_crs=result.measurement_crs,
-            geodesic_area_m2=finite(result.geodesic_area_m2),
-            geodesic_length_m=finite(result.geodesic_length_m),
-            relative_difference=finite(result.relative_difference),
+            geodesic_area_m2=result.geodesic_area_m2,
+            geodesic_length_m=result.geodesic_length_m,
+            relative_difference=result.relative_difference,
             wgs84_geometry=result.wgs84_geometry,
             transformation=transformation if result.wgs84_geometry is not None else None,
             generated_vertices=result.generated_vertices,

@@ -508,7 +508,8 @@ def _plan_inserts(
     depending on the platform.
     """
     plans = []
-    with np.errstate(over="ignore", invalid="ignore"):
+    # Overflow, 0/0 and x/0 all yield inf or NaN, which _check_capacity refuses.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         for seq in _sequences(geometry):
             segment = lengths(seq)
             if not np.isfinite(segment).all():

@@ -5,12 +5,18 @@ deliberate, documented API change: AEREO_WRITE_GOLDEN=1 uv run pytest tests/test
 """
 
 import os
+import platform
 import re
 from pathlib import Path
 
 import pytest
 
 GOLDEN = Path(__file__).parent / "fixtures" / "golden"
+# PROJ's final decimal digits differ between macOS/arm64 and Linux/amd64. Each
+# supported baseline was captured from the audited pre-UI commit (74a968f),
+# never from the implementation being tested; comparisons remain byte-exact.
+if platform.system() == "Linux" and platform.machine() == "x86_64":
+    GOLDEN /= "linux-x86_64"
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?")

@@ -6,13 +6,16 @@ from fastapi import FastAPI
 from sqlalchemy import update
 
 from app.api.config_route import router as config_router
+from app.api.exports import router as export_router
 from app.api.files import router as files_router
+from app.api.history import router as history_router
 from app.config import Settings, get_settings
 from app.database import make_engine, make_session_factory
 from app.errors import install_error_handlers
 from app.middleware import BodySizeLimitMiddleware
 from app.migrations import migrate
 from app.models import FileRecord, FileStatus, utcnow
+from app.services.cleanup import sweep_orphan_uploads
 from app.web_routes import install_web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -46,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             directory.mkdir(parents=True, exist_ok=True)
         migrate(engine)
         recover_interrupted(session_factory)
+        sweep_orphan_uploads(session_factory, settings.upload_dir)
         yield
         engine.dispose()
 
@@ -63,8 +67,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         file_limit_bytes=settings.max_upload_bytes,
     )
     install_error_handlers(app)
+    app.include_router(history_router)
     app.include_router(files_router)
     app.include_router(config_router)
+    app.include_router(export_router)
     install_web(app)
     return app
 

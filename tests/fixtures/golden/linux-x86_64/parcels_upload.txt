@@ -1,0 +1,3 @@
+200
+application/json
+{"id":"<ID>","filename":"sample_parcels.zip","format":"SHAPEFILE","size_bytes":1163,"sha256":"acd65d25a1023c73020ecf0353db717d376de15efe67b3096451183cb41cbfe0","status":"COMPLETED","feature_count":3,"counts":{"MEASURED":3},"crs":"EPSG:32643","crs_status":"KNOWN","crs_origin":"PRJ_FILE","transformation":{"operation":"Inverse of UTM zone 43N (with axis order normalized for visualization)","accuracy_m":null,"best_available":true},"warnings":[],"error":null,"created_at":"<TIME>","processed_at":"<TIME>"}

@@ -81,6 +81,7 @@ class MeasurementsPage(BaseModel):
     counts: dict[str, int]
     pagination: Pagination
     features: list[FeatureMeasurement]
+
     query: dict[str, Any] | None = Field(
         None, description="Normalised filters and sort; present only when the request used them"
     )
@@ -91,6 +92,11 @@ class MeasurementsPage(BaseModel):
         if self.query is None:
             data.pop("query", None)  # requests without the new parameters keep their exact body
         return data
+
+
+class HistoryPage(BaseModel):
+    pagination: Pagination
+    files: list[FileInfo]
 
 
 class PositionOut(BaseModel):

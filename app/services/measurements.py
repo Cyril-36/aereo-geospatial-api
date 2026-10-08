@@ -180,7 +180,7 @@ def _measure(
 
     # 2. Missing or empty geometry.
     geometry = feature.geometry
-    if geometry is None or not any(True for _ in iter_positions(geometry)):
+    if _is_empty(geometry):
         raise _Stop(Status.EMPTY_GEOMETRY, "NO_GEOMETRY", "The feature has no coordinates.")
 
     # 3-4. Geometry type.
@@ -276,6 +276,29 @@ def _measure(
                 f"{100 * abs(value - reference) / reference:.3f}%; treat it as approximate.",
             )
         )
+
+
+def _is_empty(geometry: dict[str, Any] | None) -> bool:
+    """True only when no coordinate value is present at all.
+
+    Malformed values (strings, None, numbers at the wrong depth) count as present, so they
+    reach the structure check and are reported as INVALID_GEOMETRY rather than as empty.
+    """
+    if geometry is None:
+        return True
+    if geometry.get("type") == "GeometryCollection":
+        parts = geometry.get("geometries") or []
+        return all(isinstance(p, dict) and _is_empty(p) for p in parts)
+    coordinates = geometry.get("coordinates")
+    if coordinates is None:
+        return True  # no coordinate structure at all
+    stack = [coordinates]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, (list, tuple)):
+            return False  # any value, including None, is something present
+        stack.extend(node)
+    return True
 
 
 def _two_dimensional(coordinates: Any, depth: int) -> tuple[Any, bool]:

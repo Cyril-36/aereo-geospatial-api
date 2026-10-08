@@ -88,11 +88,12 @@ class FeatureBudget:
 
 def iter_positions(geometry: dict[str, Any]):
     """Yield every coordinate position of a GeoJSON-style geometry."""
-    if geometry["type"] == "GeometryCollection":
-        for part in geometry["geometries"]:
-            yield from iter_positions(part)
+    if geometry.get("type") == "GeometryCollection":
+        for part in geometry.get("geometries") or []:
+            if isinstance(part, dict):
+                yield from iter_positions(part)
         return
-    stack = [geometry["coordinates"]]
+    stack = [geometry.get("coordinates")]
     while stack:
         item = stack.pop()
         if not isinstance(item, (list, tuple)):

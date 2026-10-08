@@ -248,6 +248,11 @@ def _measure(
         inserts = _plan_inserts(source, _planar_lengths, step)
         _check_capacity(inserts, original_vertices, limits, budget)
         densified = _to_wgs84(_densify(source, inserts, _planar_points), resolved)
+    # Densified edges can leave the region the original vertices span: a straight line in a
+    # projected CRS whose seam is not at 180° (e.g. EPSG:3832) can run the long way round the
+    # globe. The extent guards are therefore repeated on the densified geometry.
+    _check_antimeridian(densified)
+    _check_extent(densified, centre, limits.max_arc_from_centre_deg)
     generated = len(shapely.get_coordinates(densified)) - original_vertices
 
     # 9. Local equal-area projection centred on the feature.

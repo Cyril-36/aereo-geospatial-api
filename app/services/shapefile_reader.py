@@ -1,6 +1,10 @@
 """Read one extracted Shapefile dataset with Fiona, preserving geometry and attributes as-is."""
 
+import logging
 import math
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import fiona
 from fiona.errors import FionaError
@@ -19,6 +23,35 @@ from app.services.dataset import (
 from app.services.safe_zip import ShapefileComponents
 
 
+class _GdalErrorCollector(logging.Handler):
+    """Collects GDAL errors that Fiona logs (not raises) for reads on the current thread.
+
+    GDAL reports some corruption only through its error handler: a truncated .shp record
+    comes back as a null geometry and a truncated .dbf ends iteration early, both without
+    an exception. Fiona forwards those reports to the ``fiona._env`` logger.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.thread = threading.get_ident()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread == self.thread:
+            self.messages.append(record.getMessage())
+
+
+@contextmanager
+def _collect_gdal_errors() -> Iterator[_GdalErrorCollector]:
+    collector = _GdalErrorCollector()
+    logger = logging.getLogger("fiona._env")
+    logger.addHandler(collector)
+    try:
+        yield collector
+    finally:
+        logger.removeHandler(collector)
+
+
 def read_shapefile(components: ShapefileComponents, limits: IngestionLimits) -> Dataset:
     # The CRS comes only from the .prj text. GDAL reads .cpg itself and decodes attributes.
     prj_text = None
@@ -29,7 +62,10 @@ def read_shapefile(components: ShapefileComponents, limits: IngestionLimits) -> 
     budget = FeatureBudget(limits)
     features: list[RawFeature] = []
     try:
-        with fiona.open(components.shp, driver="ESRI Shapefile") as src:
+        with (
+            _collect_gdal_errors() as gdal_errors,
+            fiona.open(components.shp, driver="ESRI Shapefile") as src,
+        ):
             declared = len(src)
             if declared > limits.max_features:
                 raise IngestionError(
@@ -47,6 +83,12 @@ def read_shapefile(components: ShapefileComponents, limits: IngestionLimits) -> 
             f"Shapefile {components.archive_name!r} could not be read: {type(exc).__name__}.",
         ) from exc
 
+    if gdal_errors.messages:
+        raise IngestionError(
+            "MALFORMED_DATASET",
+            f"Shapefile {components.archive_name!r} is corrupt or truncated: "
+            f"{gdal_errors.messages[0]}",
+        )
     if len(features) != declared:
         # Never present a partial read as a complete extraction.
         raise IngestionError(

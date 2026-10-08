@@ -211,6 +211,11 @@ def test_external_entity_xxe_rejected(tmp_path):
     expect("UNSAFE_XML", tmp_path, data)
 
 
+def test_any_doctype_is_rejected(tmp_path):
+    data = b'<?xml version="1.0"?><!DOCTYPE kml><kml><Placemark/></kml>'
+    expect("UNSAFE_XML", tmp_path, data)
+
+
 def test_billion_laughs_rejected(tmp_path):
     data = b"""<?xml version="1.0"?>
 <!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">

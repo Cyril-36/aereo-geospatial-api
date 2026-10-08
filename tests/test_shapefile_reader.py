@@ -144,6 +144,25 @@ def test_corrupt_shp_is_malformed_dataset(tmp_path):
     assert exc_info.value.code == "MALFORMED_DATASET"
 
 
+def test_truncated_shp_is_not_reported_as_null_geometry(tmp_path):
+    # GDAL returns the damaged last record as a null geometry without raising.
+    files = write_shapefile(tmp_path / "s")
+    files["plots.shp"] = files["plots.shp"][:-20]
+    with pytest.raises(IngestionError) as exc_info:
+        read_zip(tmp_path, zip_of(files))
+    assert exc_info.value.code == "MALFORMED_DATASET"
+    assert "truncated" in exc_info.value.message
+
+
+def test_truncated_dbf_is_not_a_partial_extraction(tmp_path):
+    # GDAL stops iterating early without raising; the read must fail, not return 1 of 2.
+    files = write_shapefile(tmp_path / "s")
+    files["plots.dbf"] = files["plots.dbf"][:-15]
+    with pytest.raises(IngestionError) as exc_info:
+        read_zip(tmp_path, zip_of(files))
+    assert exc_info.value.code == "MALFORMED_DATASET"
+
+
 def test_extraction_directory_is_removed_after_success_and_failure(tmp_path):
     read_zip(tmp_path, zip_of(write_shapefile(tmp_path / "s")))
     assert list((tmp_path / "work").iterdir()) == []

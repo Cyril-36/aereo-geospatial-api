@@ -12,13 +12,13 @@ permissions:
 jobs:
   test:
     name: Lint and test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.8.8"
       - name: Install locked dependencies
@@ -32,9 +32,9 @@ jobs:
 
   docker:
     name: Docker image (linux/amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build
         run: docker build --platform linux/amd64 -t aereo-geospatial-api .
       - name: Start on an empty volume

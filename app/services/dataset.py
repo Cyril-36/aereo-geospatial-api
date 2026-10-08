@@ -22,7 +22,7 @@ class SourceCrs:
     status: CrsStatus
     identifier: str | None  # "EPSG:4326", or the CRS name when no EPSG code matches
     wkt: str | None
-    origin: Literal["KML_SPECIFICATION", "PRJ_FILE", "NONE"]
+    origin: Literal["KML_SPECIFICATION", "PRJ_FILE", "OVERRIDE", "NONE"]
 
 
 @dataclass(frozen=True)

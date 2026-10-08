@@ -33,6 +33,8 @@ ERROR_STATUS: dict[str, int] = {
     "MALFORMED_DATASET": 422,
     "INVALID_KML": 422,
     "UNSAFE_XML": 422,
+    "INVALID_SOURCE_CRS": 422,
+    "CRS_CONFLICT": 422,
 }
 
 

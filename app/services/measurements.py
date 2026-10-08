@@ -231,13 +231,13 @@ def _measure(
     if resolved.is_geographic:
         # Geographic edges are geodesics: add points along the WGS84 geodesic.
         inserts = _plan_inserts(wgs84, _geodesic_lengths, limits.max_segment_m)
-        _reserve(inserts, original_vertices, limits, budget)
+        _check_capacity(inserts, original_vertices, limits, budget)
         densified = _densify(wgs84, inserts, _geodesic_points)
     else:
         # Projected edges are straight in the source CRS: add points there, in source units.
         step = limits.max_segment_m / resolved.metres_per_unit
         inserts = _plan_inserts(source, _planar_lengths, step)
-        _reserve(inserts, original_vertices, limits, budget)
+        _check_capacity(inserts, original_vertices, limits, budget)
         densified = _to_wgs84(_densify(source, inserts, _planar_points), resolved)
     result.generated_vertices = sum(int(n.sum()) for n in inserts)
 
@@ -452,26 +452,42 @@ def _planar_lengths(seq: np.ndarray) -> np.ndarray:
 def _plan_inserts(
     geometry: BaseGeometry, lengths: Callable[[np.ndarray], np.ndarray], step: float
 ) -> list[np.ndarray]:
-    """Points to insert per segment so no segment is longer than ``step``. Nothing is
-    generated yet, so an excessive request is refused before any work is done."""
-    return [
-        np.maximum(np.ceil(lengths(seq) / step) - 1, 0).astype(np.int64)
-        for seq in _sequences(geometry)
-    ]
+    """Points to insert per segment so no segment is longer than ``step``, as float counts.
+
+    Counts stay floating point until ``_check_capacity`` has bounded them: a finite but huge
+    segment can need more than 2**63 points, and casting that to int64 wraps or saturates
+    depending on the platform.
+    """
+    plans = []
+    with np.errstate(over="ignore", invalid="ignore"):
+        for seq in _sequences(geometry):
+            segment = lengths(seq)
+            if not np.isfinite(segment).all():
+                raise _Stop(
+                    Status.UNSUPPORTED_EXTENT,
+                    "NON_FINITE_LENGTH",
+                    "A segment is too long to represent as a finite number in source units.",
+                )
+            plans.append(np.maximum(np.ceil(segment / step) - 1.0, 0.0))
+    return plans
 
 
-def _reserve(
+def _check_capacity(
     inserts: list[np.ndarray], original: int, limits: MeasurementLimits, budget: VertexBudget
 ) -> None:
-    generated = sum(int(n.sum()) for n in inserts)
-    if original + generated > limits.max_vertices_per_feature:
+    """Refuse an excessive densification before any point is generated, then make the counts
+    integers. Every count is bounded by the limits here, so the conversion is exact."""
+    generated = float(sum(float(n.sum()) for n in inserts))
+    if not math.isfinite(generated) or original + generated > limits.max_vertices_per_feature:
         raise _Stop(
             Status.UNSUPPORTED_EXTENT,
             "DENSIFICATION_LIMIT",
-            f"Densifying would give {original + generated} vertices; the per-feature limit is "
-            f"{limits.max_vertices_per_feature}.",
+            f"Densifying would give {original + generated:.0f} vertices; the per-feature limit "
+            f"is {limits.max_vertices_per_feature}.",
         )
-    budget.take(generated)
+    for i, counts in enumerate(inserts):
+        inserts[i] = counts.astype(np.int64)
+    budget.take(int(generated))
 
 
 def _geodesic_points(start: np.ndarray, end: np.ndarray, count: int) -> list:

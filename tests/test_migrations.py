@@ -8,7 +8,7 @@ from sqlalchemy import inspect
 
 from app import migrations
 from app.database import Base, make_engine
-from app.migrations import LATEST, V1_COLUMNS, V2_COLUMNS, MigrationError, migrate
+from app.migrations import LATEST, V1_COLUMNS, V2_COLUMNS, V3_COLUMNS, MigrationError, migrate
 
 PHASE1_DUMP = Path(__file__).parent / "fixtures" / "phase1_database.sql"
 
@@ -34,8 +34,8 @@ def columns(engine, table: str) -> dict[str, str]:
 
 def test_fresh_database_gets_current_schema_and_all_versions(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'new.db'}")
-    assert migrate(engine) == [1, 2]
-    assert migrations.applied_versions(engine) == [1, 2]
+    assert migrate(engine) == [1, 2, 3]
+    assert migrations.applied_versions(engine) == [1, 2, 3]
     for table in ("files", "features"):
         assert set(columns(engine, table)) == set(Base.metadata.tables[table].c.keys())
 
@@ -47,7 +47,7 @@ def test_phase1_database_is_upgraded_without_losing_data(tmp_path):
     assert len(before_files) == 4 and len(before_features) == 7  # the fixture's content
 
     engine = make_engine(f"sqlite:///{db}")
-    assert migrate(engine) == [1, 2]
+    assert migrate(engine) == [1, 2, 3]
     engine.dispose()
 
     # Every original value is unchanged, including statuses: EXTRACTED stays EXTRACTED.
@@ -74,8 +74,8 @@ def test_migration_is_idempotent(tmp_path):
     engine = make_engine(f"sqlite:///{phase1_database(tmp_path / 'p1.db')}")
     migrate(engine)
     assert migrate(engine) == []
-    assert migrations.applied_versions(engine) == [1, 2]
-    assert LATEST == 2
+    assert migrations.applied_versions(engine) == [1, 2, 3]
+    assert LATEST == 3
 
 
 def test_failed_migration_leaves_the_database_unchanged(tmp_path, monkeypatch):
@@ -95,7 +95,7 @@ def test_failed_migration_leaves_the_database_unchanged(tmp_path, monkeypatch):
     assert migrations.applied_versions(engine) == [1]
 
     monkeypatch.setattr(migrations, "_add_columns", real_add)
-    assert migrate(engine) == [2]
+    assert migrate(engine) == [2, 3]
     assert set(columns(engine, "files")) == V1_COLUMNS["files"] | set(V2_COLUMNS["files"])
 
 
@@ -109,3 +109,32 @@ def test_unrecognised_unversioned_schema_is_refused(tmp_path):
     with pytest.raises(MigrationError, match="does not match schema version 1"):
         migrate(engine)
     assert set(columns(engine, "files")) == {"id", "something_else"}  # untouched
+
+
+def test_v3_backfills_search_columns(tmp_path):
+    db = phase1_database(tmp_path / "p1.db")
+    engine = make_engine(f"sqlite:///{db}")
+    migrate(engine)
+    with engine.connect() as conn:
+        rows = conn.exec_driver_sql(
+            'SELECT "index", source_id, display_name, sort_name, search_text, warning_count '
+            "FROM features"
+        ).fetchall()
+    assert len(rows) == 7
+    for _, _, name, sort_name, text, warnings in rows:
+        assert name and sort_name == sort_name.casefold() and name.casefold() in text
+        assert warnings >= 0
+    assert set(V3_COLUMNS["features"]) <= set(columns(engine, "features"))
+
+
+def test_v2_database_upgrades_to_v3(tmp_path):
+    db = phase1_database(tmp_path / "p1.db")
+    engine = make_engine(f"sqlite:///{db}")
+    real = migrations.MIGRATIONS
+    migrations.MIGRATIONS = real[:2]
+    try:
+        assert migrate(engine) == [1, 2]
+    finally:
+        migrations.MIGRATIONS = real
+    assert migrate(engine) == [3]
+    assert migrations.applied_versions(engine) == [1, 2, 3]

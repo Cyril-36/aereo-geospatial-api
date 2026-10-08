@@ -70,3 +70,22 @@ def test_generated_vertices_are_points_actually_inserted():
         kml_crs(),
     )
     assert [r.generated_vertices for r in results] == [2, 0, 0, 0, 0]
+
+
+def test_failure_in_final_calculation_charges_nothing(monkeypatch):
+    def broken_reference(_geometry):
+        raise RuntimeError("geodesic reference failed")
+
+    monkeypatch.setattr(m, "_geodesic_length", broken_reference)
+    budget = VertexBudget(100)
+    result = m.FeatureMeasurement(index=0)
+    with pytest.raises(RuntimeError):
+        m._measure(
+            feature(line([(0, 0), (0, 1)])),  # 2 inserts
+            m.resolve(kml_crs()),
+            MeasurementLimits(),
+            budget,
+            result,
+        )
+    assert budget.remaining == 100
+    assert result.status == "" and result.generated_vertices == 0

@@ -53,10 +53,12 @@ DEPTH = {
     "MultiPolygon": 3,
 }
 RANGE_EPSILON = 1e-9
-# A projected coordinate inside its projection's domain survives inverse-then-forward
-# projection to well below a millimetre (observed: <= 2e-7 m on UTM, State Plane feet, Web
-# Mercator, polar stereographic, Albers, Mollweide); one outside it (e.g. in a conic's gap)
-# comes back kilometres away.
+# Projection-domain safeguard. A projected coordinate inside its projection's domain survives
+# inverse-then-forward projection to well below a millimetre (observed: <= 2e-7 m on UTM, State
+# Plane feet, Web Mercator, polar stereographic, Albers, Mollweide); one outside it (e.g. in a
+# conic's gap) comes back kilometres away. The 1 mm threshold is an empirical separator between
+# those two cases. It is not an accuracy guarantee for measurements, and a projection with a
+# poor numerical round trip could be rejected by it.
 DOMAIN_TOLERANCE_M = 0.001
 
 
@@ -277,18 +279,21 @@ def _measure(
             "Projection to the local equal-area CRS produced non-finite coordinates.",
         )
 
-    # 10. Measure, then cross-check against the geodesic reference.
+    # 10. Measure and compute the geodesic reference; only then charge the vertex budget and
+    # record the result, so nothing is charged or reported for a feature that fails here.
+    if kind in AREA_TYPES:
+        value, reference, floor = projected.area, _geodesic_area(densified), limits.area_floor_m2
+    else:
+        value, reference = projected.length, _geodesic_length(densified)
+        floor = limits.length_floor_m
     budget.commit(generated)
-    result.generated_vertices = generated  # points actually inserted, charged only on success
+    result.generated_vertices = generated  # points actually inserted
     result.status = Status.MEASURED
     result.measurement_method = METHOD
     result.measurement_crs = laea
     if kind in AREA_TYPES:
-        value, reference, floor = projected.area, _geodesic_area(densified), limits.area_floor_m2
         result.area_m2, result.geodesic_area_m2 = value, reference
     else:
-        value, reference = projected.length, _geodesic_length(densified)
-        floor = limits.length_floor_m
         result.length_m, result.geodesic_length_m = value, reference
     if reference > 0:
         result.relative_difference = abs(value - reference) / reference

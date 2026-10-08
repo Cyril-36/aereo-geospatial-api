@@ -36,7 +36,7 @@ def test_shapefile_upload_then_get(client, tmp_path):
     assert response.headers["location"] == f"/api/files/{body['id']}/"
     assert body["filename"] == "plots.zip"
     assert body["format"] == "SHAPEFILE"
-    assert body["status"] == "EXTRACTED"  # Phase 1: extracted, not measured
+    assert body["status"] == "COMPLETED"  # extracted, measured and stored
     assert body["feature_count"] == 2
     assert body["crs"] == "EPSG:4326"
     assert body["crs_status"] == "KNOWN"
@@ -225,7 +225,7 @@ def test_results_survive_restart(settings, tmp_path):
         file_id = upload(client, "plots.zip", shapefile_zip(tmp_path)).json()["id"]
     with TestClient(create_app(settings)) as client:
         body = client.get(f"/api/files/{file_id}/").json()
-    assert body["status"] == "EXTRACTED"
+    assert body["status"] == "COMPLETED"
     assert body["feature_count"] == 2
 
 
@@ -257,7 +257,7 @@ def test_unexpected_error_is_sanitised_500(client, monkeypatch, tmp_path):
     def boom(*args, **kwargs):
         raise RuntimeError("secret internal detail /etc/passwd")
 
-    monkeypatch.setattr("app.api.files.extract", boom)
+    monkeypatch.setattr("app.api.files.process", boom)
     with TestClient(client.app, raise_server_exceptions=False) as raw_client:
         response = upload(raw_client, "plots.zip", shapefile_zip(tmp_path))
     assert response.status_code == 500
@@ -270,12 +270,10 @@ def test_unexpected_error_is_sanitised_500(client, monkeypatch, tmp_path):
     assert record.error_code == "INTERNAL_ERROR"
 
 
-def test_measurements_route_not_yet_implemented(client):
-    # Phase 1 must not expose anything resembling measurements.
-    assert (
-        client.get("/api/files/00000000-0000-0000-0000-000000000000/measurements/").status_code
-        == 404
-    )
+def test_measurements_for_unknown_file_is_404(client):
+    response = client.get("/api/files/00000000-0000-0000-0000-000000000000/measurements/")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "FILE_NOT_FOUND"
 
 
 def test_shapefile_zip_fixture_has_real_components(tmp_path):

@@ -227,7 +227,23 @@ def _feature_out(feature: FeatureRecord) -> FeatureMeasurement:
     )
 
 
-@router.get("/files/{file_id}/measurements/", response_model=MeasurementsPage)
+def reject_duplicate_query_parameters(request: Request) -> None:
+    """Reject a repeated ``limit`` or ``offset`` instead of silently using the last."""
+    for name in ("limit", "offset"):
+        count = len(request.query_params.getlist(name))
+        if count > 1:
+            raise ApiError(
+                422,
+                "DUPLICATE_QUERY_PARAMETER",
+                f"Query parameter '{name}' was sent {count} times; send it at most once.",
+            )
+
+
+@router.get(
+    "/files/{file_id}/measurements/",
+    response_model=MeasurementsPage,
+    dependencies=[Depends(reject_duplicate_query_parameters)],
+)
 def get_measurements(
     request: Request,
     file_id: str,

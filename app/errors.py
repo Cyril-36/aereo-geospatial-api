@@ -38,6 +38,10 @@ ERROR_STATUS: dict[str, int] = {
 }
 
 
+# Starlette's multipart limit messages (per-part size, field count, file count).
+FORM_LIMIT_MESSAGES = ("Part exceeded maximum size", "Too many fields", "Too many files")
+
+
 class IngestionError(Exception):
     """A file cannot be ingested. ``code`` is a stable machine-readable identifier."""
 
@@ -79,6 +83,13 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+        if exc.status_code == 400:
+            # Starlette/FastAPI raise 400 when the request body cannot be parsed. Map it onto
+            # the documented contract: form limits are 413, anything else invalid input (422).
+            detail = str(exc.detail)
+            if detail.startswith(FORM_LIMIT_MESSAGES):
+                return JSONResponse(error_body("FORM_LIMIT_EXCEEDED", detail), 413)
+            return JSONResponse(error_body("MALFORMED_REQUEST", detail), 422)
         code = {404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED"}.get(exc.status_code, "HTTP_ERROR")
         return JSONResponse(error_body(code, str(exc.detail)), exc.status_code)
 

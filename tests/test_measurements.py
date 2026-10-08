@@ -169,6 +169,8 @@ def test_polygon_with_hole_and_multipolygon():
     result = measure(polygon(outer, hole))
     # ~2 km features: straight LAEA chords vs geodesic edges differ by O((L/R)^2) ~ 1e-7.
     assert result.area_m2 == pytest.approx(geod_area(outer) - geod_area(hole), rel=1e-7)
+    assert result.geodesic_area_m2 == pytest.approx(geod_area(outer) - geod_area(hole), rel=1e-9)
+    assert codes(result) == []
 
     second = box(77.03, 13.0, 77.04, 13.01)
     multi = {
@@ -177,6 +179,7 @@ def test_polygon_with_hole_and_multipolygon():
     }
     result = measure(multi)
     assert result.area_m2 == pytest.approx(geod_area(outer) + geod_area(second), rel=1e-7)
+    assert result.geodesic_area_m2 == pytest.approx(geod_area(outer) + geod_area(second), rel=1e-9)
 
 
 def test_reversed_orientation_gives_the_same_area():

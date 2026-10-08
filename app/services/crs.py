@@ -1,7 +1,7 @@
 """Source-CRS description.
 
 Phase 1 only records what the file declares. Resolution with a ``source_crs`` override
-and transformation selection arrive with the measurement engine (plan v3, section 4).
+and transformation selection arrive with the measurement engine.
 """
 
 from functools import lru_cache

@@ -1,4 +1,4 @@
-"""A small, hardened KML reader for the subset in plan v3, section 5.
+"""A small, hardened KML reader for a documented subset of KML 2.2.
 
 Parsing uses defusedxml with DTDs, entities and external references forbidden. Nothing is
 ever fetched: NetworkLinks and overlays are reported as warnings and skipped. Coordinates

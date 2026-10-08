@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     database_url: str | None = None  # defaults to SQLite inside data_dir
 
-    # Ingestion budgets (plan v3, section 5).
+    # Ingestion budgets.
     max_upload_bytes: int = 10 * MIB
     max_expanded_bytes: int = 100 * MIB
     max_archive_members: int = 1_000

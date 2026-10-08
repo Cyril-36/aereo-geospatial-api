@@ -37,7 +37,7 @@ function select(id, label, value, options, onchange) {
   );
 }
 
-export function mountTable(region, { fileId, info, config, onSelect, onFiltersChanged, onUnitsChanged }) {
+export function mountTable(region, { fileId, info, config, onSelect, onFiltersChanged, onUnitsChanged, onMissing }) {
   const state = readState();
   const pageSize = config.default_page_size;
   let rows = [];
@@ -294,6 +294,7 @@ export function mountTable(region, { fileId, info, config, onSelect, onFiltersCh
       return rows;
     } catch (error) {
       if (isAbort(error) || !gen.isCurrent() || !mounted) return;
+      if (error.code === "FILE_NOT_FOUND" && onMissing) { onMissing(); return; }
       tableWrap.removeAttribute("aria-busy");
       showError();
     }
@@ -303,6 +304,8 @@ export function mountTable(region, { fileId, info, config, onSelect, onFiltersCh
   return {
     load,
     params,
+    matching: () => total,
+    rows: () => rows,
     units: () => ({ au: state.au, lu: state.lu }),
     pageSize,
     isFiltered,

@@ -119,7 +119,6 @@ def test_missing_crs_then_reupload_with_crs(page_ok, server):
     expect(page_ok.locator("#crs-summary")).to_contain_text("supplied at upload")
 
 
-@pytest.mark.skip(reason="needs GET /api/files/ (Task 10)")
 def test_double_click_creates_one_record(page_ok, server):
     page_ok.goto(server.base_url + "/")
     page_ok.set_input_files("#file-input", str(SAMPLES / "sample_survey.kml"))

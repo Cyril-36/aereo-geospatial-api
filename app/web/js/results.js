@@ -1,13 +1,15 @@
 // Results view for one file: overview, then the feature table, map and details (mounted into
 // #table-region and #map-region). Everything the page needs comes from the API.
 import { api, ApiError } from "./api.js";
-import { h, clear, toast } from "./dom.js";
+import { h, clear, debounce, toast } from "./dom.js";
 import * as fmt from "./format.js";
 import { isNavigation, navigate, queryParams, updateQuery } from "./router.js";
 import { nextGeneration, isAbort } from "./state.js";
 import { prepareReupload } from "./upload.js";
 import { mountTable } from "./table.js";
 import { renderDetails } from "./details.js";
+import { mountMap } from "./map.js";
+import { openExportDialog } from "./dialogs.js";
 
 let configCache = null;
 
@@ -236,6 +238,7 @@ function buildOverview(info, config, gen, cleanups) {
   if (!completed) {
     const guide = fmt.errorGuide(info.status === "PROCESSING" ? "FILE_NOT_READY" : "MEASUREMENTS_UNAVAILABLE");
     section.append(h("div", { class: "notice-warn", role: "status" }, h("div", { class: "title" }, guide.title), h("p", { style: "margin:0" }, guide.advice)));
+    if (info.status === "PROCESSING") section.append(h("button", { type: "button", class: "btn", onclick: () => navigate(location.pathname + location.search, { replace: true }) }, "Refresh processing status"));
     return section;
   }
 
@@ -296,7 +299,7 @@ function buildOverview(info, config, gen, cleanups) {
   };
   if (counts.total > 0) {
     cleanups.push(
-      mountWorkspace(info, config, tableRegion, sideRegion, (next) => {
+      mountWorkspace(info, config, tableRegion, sideRegion, actions, (next) => {
         units = next;
         showSums();
       }),
@@ -330,9 +333,11 @@ function buildOverview(info, config, gen, cleanups) {
 
 // Table, details and (from Task 9) map for a completed file, kept in sync through one
 // selected feature index that also lives in the URL as ?feature=.
-function mountWorkspace(info, config, tableRegion, sideRegion, onUnits) {
+function mountWorkspace(info, config, tableRegion, sideRegion, actions, onUnits) {
+  let mounted = true;
   const detailsPanel = h("aside", { id: "details", class: "details", hidden: true, "aria-labelledby": "details-title" });
-  sideRegion.append(detailsPanel);
+  const mapRegion = h("div", { id: "map-region" });
+  sideRegion.append(detailsPanel, mapRegion);
   let selectedIndex = null;
   let selectedFeature = null;
   const narrow = window.matchMedia("(max-width: 720px)");
@@ -342,12 +347,20 @@ function mountWorkspace(info, config, tableRegion, sideRegion, onUnits) {
     info,
     config,
     onSelect: (feature) => selectFeature(feature, { push: true }),
-    onFiltersChanged: () => refreshHidden(),
+    onMissing: () => navigate(location.pathname + location.search, { replace: true }),
+    onFiltersChanged: (params) => {
+      refreshHidden();
+      reloadMap(params);
+    },
     onUnitsChanged: (units) => {
       if (selectedFeature) showDetails(selectedFeature);
       onUnits(units);
     },
   });
+
+  const map = mountMap(mapRegion, { fileId: info.id, config, onPick: (index) => openIndex(index, { push: true }) });
+  actions.prepend(h("button", { type: "button", class: "btn btn-primary", onclick: () => openExportDialog({ fileId: info.id, info, params: table.params(), matching: table.matching(), rows: table.rows() }) }, "Download results"));
+  const reloadMap = debounce((params) => map.load(params), 300);
 
   function showDetails(feature) {
     renderDetails(detailsPanel, feature, { units: table.units(), onClose: close });
@@ -355,11 +368,13 @@ function mountWorkspace(info, config, tableRegion, sideRegion, onUnits) {
   }
 
   function selectFeature(feature, { push }) {
+    if (!mounted) return;
     selectedIndex = feature.index;
     selectedFeature = feature;
     table.setSelected(feature.index);
     table.setHiddenNotice(false);
     showDetails(feature);
+    map.select(feature.index);
     updateQuery({ feature: feature.index }, { push });
     if (narrow.matches) detailsPanel.querySelector("h2").focus();
   }
@@ -372,6 +387,7 @@ function mountWorkspace(info, config, tableRegion, sideRegion, onUnits) {
     clear(detailsPanel);
     table.setSelected(null);
     table.setHiddenNotice(false);
+    map.select(null);
     updateQuery({ feature: "" }, { push: true });
     if (index !== null && !table.focusRow(index)) document.getElementById("feature-table")?.focus();
   }
@@ -379,32 +395,38 @@ function mountWorkspace(info, config, tableRegion, sideRegion, onUnits) {
   async function refreshHidden() {
     if (selectedIndex === null) return;
     const index = selectedIndex;
+    const gen = nextGeneration("selection-notice");
     try {
-      const position = await api.getPosition(info.id, index, { ...table.params(), limit: table.pageSize });
-      if (selectedIndex === index) table.setHiddenNotice(!position.matches);
+      const position = await api.getPosition(info.id, index, { ...table.params(), limit: table.pageSize }, { signal: gen.signal });
+      if (mounted && gen.isCurrent() && selectedIndex === index) table.setHiddenNotice(!position.matches);
     } catch {
       // the notice is a hint; the table itself is unaffected
     }
   }
 
-  async function featureAt(index) {
-    const page = await api.getMeasurements(info.id, { limit: 1, offset: index });
-    return page.features[0] || null;
+  async function featureAt(index, signal) {
+    const page = await api.getMeasurements(info.id, { limit: 1, offset: index }, { signal });
+    const feature = page.features[0];
+    return feature && feature.index === index ? feature : null; // indexes are 0..n-1
   }
 
   async function openIndex(index, { push }) {
+    if (!mounted) return;
+    const gen = nextGeneration("selection");
     try {
-      const position = await api.getPosition(info.id, index, { ...table.params(), limit: table.pageSize });
+      const position = await api.getPosition(info.id, index, { ...table.params(), limit: table.pageSize }, { signal: gen.signal });
+      if (!mounted || !gen.isCurrent()) return;
       let feature = null;
       if (position.matches) {
         await table.showOffset(position.page_offset);
         feature = table.rowFor(index);
       }
-      feature = feature || (await featureAt(index));
-      if (!feature) return;
+      feature = feature || (await featureAt(index, gen.signal));
+      if (!feature || !mounted || !gen.isCurrent()) return;
       selectFeature(feature, { push });
       if (!position.matches) table.setHiddenNotice(true);
     } catch (error) {
+      if (!mounted || !gen.isCurrent()) return;
       if (error instanceof ApiError && error.code === "FEATURE_NOT_FOUND") updateQuery({ feature: "" });
     }
   }
@@ -415,13 +437,18 @@ function mountWorkspace(info, config, tableRegion, sideRegion, onUnits) {
   document.addEventListener("keydown", onKey);
 
   (async () => {
+    map.load(table.params());
     await table.load();
+    if (!mounted) return;
     const raw = queryParams().get("feature");
     if (raw !== null && /^\d+$/.test(raw)) await openIndex(Number(raw), { push: false });
   })();
 
   return () => {
+    mounted = false;
     document.removeEventListener("keydown", onKey);
+    reloadMap.cancel();
     table.destroy();
+    map.destroy();
   };
 }

@@ -3,6 +3,7 @@
 // survive a refresh or a shared link lives in the query string.
 import { abortAll } from "./state.js";
 import { clear } from "./dom.js";
+import { closeDialogs } from "./dialogs.js";
 
 let views = {};
 let cleanup = null;
@@ -17,6 +18,7 @@ function match(pathname) {
 }
 
 function render() {
+  closeDialogs();
   if (typeof cleanup === "function") cleanup();
   cleanup = null;
   abortAll();

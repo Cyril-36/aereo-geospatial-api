@@ -1,6 +1,6 @@
 // Feature details: the measurement first, then status, warnings, attributes, and the
 // technical record (CRS, projection, transformation, geodesic check) behind a disclosure.
-import { h, clear, icon } from "./dom.js";
+import { h, clear, icon, append } from "./dom.js";
 import * as fmt from "./format.js";
 
 function measurementBlock(feature, units) {
@@ -70,7 +70,7 @@ export function renderDetails(panel, feature, { units, onClose }) {
   const m = measurementBlock(feature, units);
   const tone = fmt.statusTone(feature.status);
   const props = Object.entries(feature.properties || {});
-  panel.append(
+  append(panel, [
     h(
       "div",
       { class: "details-head" },
@@ -117,5 +117,5 @@ export function renderDetails(panel, feature, { units, onClose }) {
         : h("p", { class: "small", style: "margin:0" }, "No attributes."),
     ),
     technical(feature),
-  );
+  ]);
 }

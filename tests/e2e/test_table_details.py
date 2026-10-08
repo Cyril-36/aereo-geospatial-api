@@ -27,6 +27,11 @@ def test_invalid_geometry_reasons_visible(page_ok, server):
     expect(rows.nth(3)).to_contain_text("1 warning")
     expect(rows.nth(4)).to_contain_text("n/a")
     expect(rows.nth(4)).not_to_contain_text("0.00")
+    rows.nth(0).get_by_role("button").click()
+    expect(page_ok.locator("#details")).not_to_contain_text("null")
+    rows.nth(3).get_by_role("button").click()
+    expect(page_ok.locator("#details")).to_contain_text("MULTIPLE_GEOMETRIES")
+    expect(page_ok.locator("#details")).not_to_contain_text("[object")
     rows.nth(1).get_by_role("button").click()
     details = page_ok.locator("#details")
     expect(details).to_contain_text("RING_NOT_CLOSED")
@@ -88,7 +93,9 @@ def test_units_toggle_keeps_full_precision_in_details(page_ok, server):
     expect(page_ok.locator("#feature-table thead")).to_contain_text("Area (ha)")
     page_ok.locator(ROWS).first.get_by_role("button").click()
     expect(page_ok.locator("#details")).to_contain_text("0.9988 ha")
-    expect(page_ok.locator("#details")).to_contain_text("9988.464368965011 m²")
+    fid = page_ok.url.split("/files/", 1)[1].split("?", 1)[0]
+    original = page_ok.request.get(f"{server.base_url}/api/files/{fid}/measurements/").json()
+    expect(page_ok.locator("#details")).to_contain_text(f"{original['features'][0]['area_m2']} m²")
     page_ok.reload()
     expect(page_ok.locator(ROWS).first).to_contain_text("0.9988")
 

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import update
 
+from app.api.config_route import router as config_router
 from app.api.files import router as files_router
 from app.config import Settings, get_settings
 from app.database import make_engine, make_session_factory
@@ -12,6 +13,7 @@ from app.errors import install_error_handlers
 from app.middleware import BodySizeLimitMiddleware
 from app.migrations import migrate
 from app.models import FileRecord, FileStatus, utcnow
+from app.web_routes import install_web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -62,6 +64,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     install_error_handlers(app)
     app.include_router(files_router)
+    app.include_router(config_router)
+    install_web(app)
     return app
 
 

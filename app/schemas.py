@@ -81,3 +81,14 @@ class MeasurementsPage(BaseModel):
     counts: dict[str, int]
     pagination: Pagination
     features: list[FeatureMeasurement]
+
+
+class ConfigOut(BaseModel):
+    max_upload_bytes: int
+    max_features: int
+    default_page_size: int
+    max_page_size: int
+    accepted_extensions: list[str]
+    map_tile_url: str = Field(description="Basemap tile URL template; empty when disabled")
+    map_max_features: int = Field(description="Features drawn on the map before it is partial")
+    map_max_vertices: int = Field(description="Vertices drawn on the map before it is partial")

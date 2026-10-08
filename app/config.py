@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     default_page_size: int = 100
     max_page_size: int = 1_000
     max_source_crs_chars: int = 20_000
+    history_default_page_size: int = 50
+    history_max_page_size: int = 200
+    max_search_chars: int = 200
+
+    # Web workspace. An empty tile URL turns the basemap off (vectors still draw).
+    map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    map_max_features: int = 5_000
+    map_max_vertices: int = 250_000
 
     max_concurrent_processing: int = 2
 

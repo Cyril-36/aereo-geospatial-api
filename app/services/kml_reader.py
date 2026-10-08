@@ -139,29 +139,35 @@ class _Reader:
         self.features.append(feature)
         self._properties(placemark, feature)
 
-        geometry_el = None
-        for child in placemark:
-            ns, local = _split_tag(child.tag) if isinstance(child.tag, str) else ("?", "")
-            if ns == self.ns and (local in SIMPLE_GEOMETRIES or local == "MultiGeometry"):
-                geometry_el = child
-                break
-            if local in UNSUPPORTED_GEOMETRIES:
-                feature.geometry_type = local
-                feature.issue_code = "UNSUPPORTED_GEOMETRY"
-                feature.issue_detail = f"KML <{local}> is outside the supported subset."
-                return
-        if geometry_el is None:
+        children = [c for c in placemark if self._is_geometry(c)]
+        if not children:
             return  # no geometry: kept as a feature with null geometry
+        if len(children) > 1:
+            # KML allows one geometry per Placemark. Rather than keep only the first, keep all
+            # of them together, exactly as an explicit MultiGeometry would be.
+            feature.warnings.append(
+                warning(
+                    "MULTIPLE_GEOMETRIES",
+                    f"Placemark has {len(children)} geometries (KML allows one); they are "
+                    "kept together as one multi-geometry.",
+                )
+            )
+        label = _split_tag(children[0].tag)[1] if len(children) == 1 else "MultiGeometry"
 
         try:
-            geometry = self._geometry(geometry_el, depth=0)
+            if len(children) == 1 and label in UNSUPPORTED_GEOMETRIES:
+                geometry = {"unsupported": label}
+            elif len(children) == 1:
+                geometry = self._geometry(children[0], depth=0)
+            else:
+                geometry = self._combine(children, depth=0)
         except _CoordinateError as exc:
-            feature.geometry_type = self._local(geometry_el)
+            feature.geometry_type = label
             feature.issue_code = "INVALID_COORDINATES"
             feature.issue_detail = str(exc)
             return
         if geometry is None:
-            feature.geometry_type = self._local(geometry_el)
+            feature.geometry_type = label
             return
         if geometry.get("unsupported"):
             feature.geometry_type = geometry["unsupported"]
@@ -172,6 +178,13 @@ class _Reader:
             return
         feature.geometry_type = geometry["type"]
         feature.geometry = geometry
+
+    def _is_geometry(self, element: Element) -> bool:
+        if not isinstance(element.tag, str):
+            return False
+        ns, local = _split_tag(element.tag)
+        in_kml = ns == self.ns and (local in SIMPLE_GEOMETRIES or local == "MultiGeometry")
+        return in_kml or local in UNSUPPORTED_GEOMETRIES  # e.g. gx:Track
 
     def _properties(self, placemark: Element, feature: RawFeature) -> None:
         props = feature.properties
@@ -243,11 +256,19 @@ class _Reader:
         return None
 
     def _polygon(self, element: Element) -> dict[str, Any] | None:
-        outer = self._child(element, "outerBoundaryIs")
-        outer_ring = self._child(outer, "LinearRing") if outer is not None else None
-        if outer_ring is None:
-            raise _CoordinateError("Polygon has no outerBoundaryIs/LinearRing.")
-        rings = [self._coordinates(outer_ring)]
+        outers = self._children(element, "outerBoundaryIs")
+        if len(outers) != 1:
+            raise _CoordinateError(
+                f"Polygon needs exactly one outerBoundaryIs; found {len(outers)}."
+            )
+        outer_rings = self._children(outers[0], "LinearRing")
+        if len(outer_rings) != 1:
+            # Several outer rings are not a polygon; guessing (first ring, or a multipolygon)
+            # would change the measured area.
+            raise _CoordinateError(
+                f"outerBoundaryIs needs exactly one LinearRing; found {len(outer_rings)}."
+            )
+        rings = [self._coordinates(outer_rings[0])]
         if not rings[0]:
             return None
         # KML 2.2 puts one ring per innerBoundaryIs, but files with several rings inside
@@ -260,8 +281,13 @@ class _Reader:
     def _multi(self, element: Element, depth: int) -> dict[str, Any] | None:
         if depth >= MAX_MULTIGEOMETRY_DEPTH:
             raise _CoordinateError("MultiGeometry nesting is too deep.")
+        return self._combine(list(element), depth)
+
+    def _combine(self, elements: list[Element], depth: int) -> dict[str, Any] | None:
+        """Combine geometry elements: homogeneous parts become a Multi* geometry, mixed
+        parts a GeometryCollection, and any unsupported part makes the whole unsupported."""
         parts: list[dict[str, Any]] = []
-        for child in element:
+        for child in elements:
             ns, local = _split_tag(child.tag) if isinstance(child.tag, str) else ("?", "")
             if local in UNSUPPORTED_GEOMETRIES:
                 return {"unsupported": local}

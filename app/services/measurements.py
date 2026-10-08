@@ -1,0 +1,620 @@
+"""Per-feature area and length measurement.
+
+Each measurable feature is converted to WGS84, densified, projected onto a Lambert Azimuthal
+Equal-Area CRS centred on the feature, and measured there. The result is cross-checked against
+``pyproj.Geod``; a disagreement is reported as a warning, not hidden and not treated as proof.
+
+Status precedence (the first rule that applies wins):
+
+1. A problem the reader recorded for the feature    -> UNSUPPORTED_GEOMETRY / INVALID_GEOMETRY
+2. No geometry, or no coordinates                    -> EMPTY_GEOMETRY
+3. Point or MultiPoint                               -> NOT_APPLICABLE
+4. Any type other than (Multi)Polygon/(Multi)LineString -> UNSUPPORTED_GEOMETRY
+5. Malformed structure or invalid geometry (no repair) -> INVALID_GEOMETRY
+6. Source CRS unknown / unusable                     -> UNKNOWN_CRS / CRS_UNSUPPORTED
+7. Conversion to WGS84 fails or leaves the valid range -> TRANSFORM_FAILED
+8. Antimeridian crossing, hemisphere-scale extent, densification budget -> UNSUPPORTED_EXTENT
+9. Projection to the local LAEA fails, or the calculated value or its geodesic reference
+   is not a finite, non-negative number               -> TRANSFORM_FAILED
+10. Otherwise                                         -> MEASURED
+
+Geometry checks come before CRS checks because they need no CRS: an invalid polygon is reported
+as invalid even when its CRS is also unknown.
+"""
+
+import json
+import math
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+import shapely
+from pyproj import CRS, Geod, Transformer
+from pyproj.exceptions import ProjError
+from shapely.errors import GEOSException
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon, shape
+from shapely.geometry.base import BaseGeometry
+
+from app.services.crs import WGS84, ResolvedCrs, apply_override, resolve
+from app.services.dataset import Dataset, RawFeature, iter_positions, warning
+
+GEOD = Geod(ellps="WGS84")
+METHOD = "LOCAL_LAEA"
+AREA_TYPES = {"Polygon", "MultiPolygon"}
+LENGTH_TYPES = {"LineString", "MultiLineString"}
+POINT_TYPES = {"Point", "MultiPoint"}
+# Nesting depth of the coordinate array for each GeoJSON type (0 = a single position).
+DEPTH = {
+    "Point": 0,
+    "MultiPoint": 1,
+    "LineString": 1,
+    "MultiLineString": 2,
+    "Polygon": 2,
+    "MultiPolygon": 3,
+}
+RANGE_EPSILON = 1e-9
+# Projection-domain safeguard. A projected coordinate inside its projection's domain survives
+# inverse-then-forward projection to well below a millimetre (observed: <= 2e-7 m on UTM, State
+# Plane feet, Web Mercator, polar stereographic, Albers, Mollweide); one outside it (e.g. in a
+# conic's gap) comes back kilometres away. The 1 mm threshold is an empirical separator between
+# those two cases. It is not an accuracy guarantee for measurements, and a projection with a
+# poor numerical round trip could be rejected by it.
+DOMAIN_TOLERANCE_M = 0.001
+
+
+class Status:
+    MEASURED = "MEASURED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    UNKNOWN_CRS = "UNKNOWN_CRS"
+    CRS_UNSUPPORTED = "CRS_UNSUPPORTED"
+    EMPTY_GEOMETRY = "EMPTY_GEOMETRY"
+    INVALID_GEOMETRY = "INVALID_GEOMETRY"
+    UNSUPPORTED_GEOMETRY = "UNSUPPORTED_GEOMETRY"
+    UNSUPPORTED_EXTENT = "UNSUPPORTED_EXTENT"
+    TRANSFORM_FAILED = "TRANSFORM_FAILED"
+
+
+READER_ISSUE_STATUS = {
+    "UNSUPPORTED_GEOMETRY": Status.UNSUPPORTED_GEOMETRY,
+    "INVALID_COORDINATES": Status.INVALID_GEOMETRY,
+    "NON_FINITE_COORDINATES": Status.INVALID_GEOMETRY,
+}
+
+
+@dataclass(frozen=True)
+class MeasurementLimits:
+    max_segment_m: float = 50_000.0  # densification target, in metres
+    max_vertices_per_feature: int = 200_000  # original + generated
+    max_total_vertices: int = 1_000_000  # whole file, original + generated
+    max_arc_from_centre_deg: float = 90.0
+    relative_tolerance: float = 0.001  # 0.1 %
+    area_floor_m2: float = 0.01  # differences below these are never reported
+    length_floor_m: float = 0.001
+
+
+@dataclass
+class FeatureMeasurement:
+    index: int
+    status: str = ""
+    reason_code: str | None = None
+    reason: str | None = None
+    area_m2: float | None = None
+    length_m: float | None = None
+    measurement_method: str | None = None
+    measurement_crs: str | None = None
+    geodesic_area_m2: float | None = None
+    geodesic_length_m: float | None = None
+    relative_difference: float | None = None
+    wgs84_geometry: dict[str, Any] | None = None  # 2D, original vertices, EPSG:4326
+    generated_vertices: int = 0
+    warnings: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class MeasuredDataset:
+    crs: ResolvedCrs
+    features: list[FeatureMeasurement]
+    warnings: list[dict[str, str]]
+
+
+class _Stop(Exception):
+    """Ends one feature's measurement with an explicit status."""
+
+    def __init__(self, status: str, code: str, reason: str) -> None:
+        super().__init__(reason)
+        self.status, self.code, self.reason = status, code, reason
+
+
+class VertexBudget:
+    """File-wide allowance for vertices generated by densification.
+
+    A feature is checked against the budget before any point is generated, but the budget is
+    only charged once the feature is measured, so a feature that fails afterwards does not use
+    up allowance needed by later features.
+    """
+
+    def __init__(self, remaining: int) -> None:
+        self.remaining = max(remaining, 0)
+
+    def check(self, count: float) -> None:
+        if count > self.remaining:
+            raise _Stop(
+                Status.UNSUPPORTED_EXTENT,
+                "DENSIFICATION_LIMIT",
+                f"Densifying needs {count:.0f} more vertices; only {self.remaining} remain in "
+                "the file's vertex budget.",
+            )
+
+    def commit(self, count: int) -> None:
+        if not 0 <= count <= self.remaining:
+            raise RuntimeError(f"vertex budget commit of {count} outside 0..{self.remaining}")
+        self.remaining -= count
+
+
+def measure_dataset(
+    dataset: Dataset,
+    limits: MeasurementLimits | None = None,
+    source_crs_override: str | None = None,
+) -> MeasuredDataset:
+    """Measure every feature. Raises IngestionError only for file-level CRS errors
+    (INVALID_SOURCE_CRS, CRS_CONFLICT); everything else is a per-feature status."""
+    limits = limits or MeasurementLimits()
+    resolved = resolve(apply_override(dataset.source_crs, source_crs_override))
+    original = sum(
+        sum(1 for _ in iter_positions(f.geometry)) for f in dataset.features if f.geometry
+    )
+    budget = VertexBudget(limits.max_total_vertices - original)
+    features = [measure_feature(f, resolved, limits, budget) for f in dataset.features]
+    return MeasuredDataset(resolved, features, list(resolved.warnings))
+
+
+def measure_feature(
+    feature: RawFeature,
+    resolved: ResolvedCrs,
+    limits: MeasurementLimits,
+    budget: VertexBudget,
+) -> FeatureMeasurement:
+    result = FeatureMeasurement(index=feature.index)
+    try:
+        _measure(feature, resolved, limits, budget, result)
+    except _Stop as stop:
+        result.status, result.reason_code, result.reason = stop.status, stop.code, stop.reason
+    return result
+
+
+def _measure(
+    feature: RawFeature,
+    resolved: ResolvedCrs,
+    limits: MeasurementLimits,
+    budget: VertexBudget,
+    result: FeatureMeasurement,
+) -> None:
+    # 1. Problems the reader already found.
+    if feature.issue_code:
+        status = READER_ISSUE_STATUS.get(feature.issue_code, Status.INVALID_GEOMETRY)
+        raise _Stop(status, feature.issue_code, feature.issue_detail or feature.issue_code)
+
+    # 2. Missing or empty geometry.
+    geometry = feature.geometry
+    if _is_empty(geometry):
+        raise _Stop(Status.EMPTY_GEOMETRY, "NO_GEOMETRY", "The feature has no coordinates.")
+
+    # 3-4. Geometry type.
+    kind = geometry.get("type")
+    if kind not in DEPTH or kind not in AREA_TYPES | LENGTH_TYPES | POINT_TYPES:
+        raise _Stop(
+            Status.UNSUPPORTED_GEOMETRY,
+            "UNSUPPORTED_TYPE",
+            f"{kind} is not measured; only (Multi)Polygon and (Multi)LineString are.",
+        )
+
+    # 5. Structure and validity, on a 2D working copy. Nothing is repaired.
+    coordinates, had_z = _two_dimensional(geometry["coordinates"], DEPTH[kind])
+    if had_z:
+        result.warnings.append(warning("Z_DROPPED", "Altitude was ignored; measurements are 2D."))
+    if kind in POINT_TYPES:
+        result.status = Status.NOT_APPLICABLE
+        result.reason_code = "POINT_GEOMETRY"
+        result.reason = "Points have no area or length."
+        if resolved.status == "OK":
+            source = shape({"type": kind, "coordinates": coordinates})
+            try:
+                result.wgs84_geometry = _geojson(_to_wgs84(source, resolved))
+            except _Stop as stop:
+                result.warnings.append(warning(stop.code, stop.reason))
+        return
+    _check_structure(kind, coordinates)
+    try:
+        source = shape({"type": kind, "coordinates": coordinates})
+    except (ValueError, TypeError, GEOSException) as exc:
+        raise _Stop(Status.INVALID_GEOMETRY, "MALFORMED_STRUCTURE", str(exc)) from exc
+    if not source.is_valid:
+        raise _Stop(Status.INVALID_GEOMETRY, "INVALID_GEOMETRY", shapely.is_valid_reason(source))
+
+    # 6. CRS.
+    if resolved.status != "OK":
+        raise _Stop(resolved.status, resolved.reason_code or "", resolved.reason or "")
+
+    # 7. Original vertices to WGS84 (also the geometry reported back).
+    wgs84 = _to_wgs84(source, resolved)
+    _check_projection_domain(source, resolved)
+    result.wgs84_geometry = _geojson(wgs84)
+
+    # 8. Extent guards, then bounded densification.
+    _check_antimeridian(wgs84)
+    centre = _centre(wgs84)
+    _check_extent(wgs84, centre, limits.max_arc_from_centre_deg)
+    original_vertices = len(shapely.get_coordinates(source))
+    if resolved.is_geographic:
+        # Geographic edges are geodesics: add points along the WGS84 geodesic.
+        inserts = _plan_inserts(wgs84, _geodesic_lengths, limits.max_segment_m)
+        _check_capacity(inserts, original_vertices, limits, budget)
+        densified = _densify(wgs84, inserts, _geodesic_points)
+    else:
+        # Projected edges are straight in the source CRS: add points there, in source units.
+        step = limits.max_segment_m / resolved.metres_per_unit
+        inserts = _plan_inserts(source, _planar_lengths, step)
+        _check_capacity(inserts, original_vertices, limits, budget)
+        densified_source = _densify(source, inserts, _planar_points)
+        densified = _to_wgs84(densified_source, resolved)
+        _check_projection_domain(densified_source, resolved)
+    # Densified edges can leave the region the original vertices span: a straight line in a
+    # projected CRS whose seam is not at 180° (e.g. EPSG:3832) can run the long way round the
+    # globe. The extent guards are therefore repeated on the densified geometry.
+    _check_antimeridian(densified)
+    _check_extent(densified, centre, limits.max_arc_from_centre_deg)
+    generated = len(shapely.get_coordinates(densified)) - original_vertices
+
+    # 9. Local equal-area projection centred on the feature.
+    laea = (
+        f"+proj=laea +lat_0={float(centre[1])!r} +lon_0={float(centre[0])!r} "
+        "+datum=WGS84 +units=m +no_defs"
+    )
+    to_laea = Transformer.from_crs(WGS84, CRS.from_proj4(laea), always_xy=True)
+    projected = _apply(densified, to_laea)
+    if not np.isfinite(shapely.get_coordinates(projected)).all():
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "LAEA_PROJECTION_FAILED",
+            "Projection to the local equal-area CRS produced non-finite coordinates.",
+        )
+
+    # 10. Measure and compute the geodesic reference; only then charge the vertex budget and
+    # record the result, so nothing is charged or reported for a feature that fails here.
+    if kind in AREA_TYPES:
+        value, reference, floor = projected.area, _geodesic_area(densified), limits.area_floor_m2
+    else:
+        value, reference = projected.length, _geodesic_length(densified)
+        floor = limits.length_floor_m
+    _check_measured_values(value, reference)
+    budget.commit(generated)
+    result.generated_vertices = generated  # points actually inserted
+    result.status = Status.MEASURED
+    result.measurement_method = METHOD
+    result.measurement_crs = laea
+    if kind in AREA_TYPES:
+        result.area_m2, result.geodesic_area_m2 = value, reference
+    else:
+        result.length_m, result.geodesic_length_m = value, reference
+    difference = abs(value - reference)
+    if reference > 0:
+        result.relative_difference = difference / reference
+    # Relative tolerance with an absolute floor. A zero reference has no meaningful
+    # percentage, so only the absolute difference is reported for it.
+    if difference > max(limits.relative_tolerance * reference, floor):
+        unit = "m²" if kind in AREA_TYPES else "m"
+        size = (
+            f"{100 * difference / reference:.3f}%"
+            if reference > 0
+            else f"{difference:.6g} {unit} (the reference is zero)"
+        )
+        result.warnings.append(
+            warning(
+                "GEODESIC_DISAGREEMENT",
+                f"Projected value differs from the geodesic reference by {size}; "
+                "treat it as approximate.",
+            )
+        )
+
+
+def _check_measured_values(value: float, reference: float) -> None:
+    """A measurement and its geodesic reference must be finite and non-negative; zero is a
+    valid calculated value. Checked before anything is charged or recorded."""
+    if not (math.isfinite(value) and math.isfinite(reference)):
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "NON_FINITE_MEASUREMENT",
+            "The calculated value or its geodesic reference is not a finite number.",
+        )
+    if value < 0 or reference < 0:
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "NEGATIVE_MEASUREMENT",
+            "The calculated value or its geodesic reference is negative.",
+        )
+
+
+def _is_empty(geometry: dict[str, Any] | None) -> bool:
+    """True only when no coordinate value is present at all.
+
+    Malformed values (strings, None, numbers at the wrong depth) count as present, so they
+    reach the structure check and are reported as INVALID_GEOMETRY rather than as empty.
+    """
+    if geometry is None:
+        return True
+    if geometry.get("type") == "GeometryCollection":
+        parts = geometry.get("geometries") or []
+        return all(isinstance(p, dict) and _is_empty(p) for p in parts)
+    coordinates = geometry.get("coordinates")
+    if coordinates is None:
+        return True  # no coordinate structure at all
+    stack = [coordinates]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, (list, tuple)):
+            return False  # any value, including None, is something present
+        stack.extend(node)
+    return True
+
+
+def _two_dimensional(coordinates: Any, depth: int) -> tuple[Any, bool]:
+    """Copy coordinates keeping x and y only; validates nesting and numbers."""
+    had_z = False
+
+    def walk(node: Any, level: int) -> Any:
+        nonlocal had_z
+        if not isinstance(node, (list, tuple)):
+            raise _Stop(
+                Status.INVALID_GEOMETRY, "MALFORMED_STRUCTURE", "Unexpected coordinate nesting."
+            )
+        if level > 0:
+            return [walk(child, level - 1) for child in node]
+        if len(node) < 2 or not all(isinstance(v, (int, float)) for v in node):
+            raise _Stop(Status.INVALID_GEOMETRY, "BAD_POSITION", f"Invalid position {node!r}.")
+        if not all(math.isfinite(v) for v in node[:2]):
+            raise _Stop(
+                Status.INVALID_GEOMETRY, "NON_FINITE_COORDINATES", "Coordinate is not finite."
+            )
+        had_z = had_z or len(node) > 2
+        return [float(node[0]), float(node[1])]
+
+    return walk(coordinates, depth), had_z
+
+
+def _check_structure(kind: str, coordinates: Any) -> None:
+    """Reject structures shapely would silently 'fix' (e.g. by closing an open ring)."""
+    if kind in LENGTH_TYPES:
+        lines = [coordinates] if kind == "LineString" else coordinates
+        for line in lines:
+            if len(line) < 2:
+                raise _Stop(
+                    Status.INVALID_GEOMETRY, "LINE_TOO_SHORT", "A line needs at least 2 points."
+                )
+        return
+    polygons = [coordinates] if kind == "Polygon" else coordinates
+    for rings in polygons:
+        if not rings:
+            raise _Stop(Status.INVALID_GEOMETRY, "POLYGON_WITHOUT_RINGS", "Polygon has no rings.")
+        for ring in rings:
+            if len(ring) < 4:
+                raise _Stop(
+                    Status.INVALID_GEOMETRY, "RING_TOO_SHORT", "A ring needs at least 4 points."
+                )
+            if ring[0] != ring[-1]:
+                raise _Stop(
+                    Status.INVALID_GEOMETRY,
+                    "RING_NOT_CLOSED",
+                    "A ring's first and last points differ; it is not closed automatically.",
+                )
+
+
+def _apply(geometry: BaseGeometry, transformer: Transformer) -> BaseGeometry:
+    def convert(xy: np.ndarray) -> np.ndarray:
+        x, y = transformer.transform(xy[:, 0], xy[:, 1], errcheck=False)
+        return np.column_stack([x, y])
+
+    return shapely.transform(geometry, convert)
+
+
+def _check_projection_domain(geometry: BaseGeometry, resolved: ResolvedCrs) -> None:
+    """Projected sources: every coordinate must round-trip through the inverse projection.
+
+    PROJ's inverse returns a longitude/latitude even for points no forward projection can
+    produce (a conic's gap, beyond Mercator's pole); such points would be measured as if real.
+    """
+    if resolved.to_geodetic is None:
+        return
+    xy = shapely.get_coordinates(geometry)
+    try:
+        lon, lat = resolved.to_geodetic.transform(xy[:, 0], xy[:, 1], errcheck=False)
+        x, y = resolved.to_geodetic.transform(lon, lat, direction="INVERSE", errcheck=False)
+    except ProjError as exc:
+        raise _Stop(Status.TRANSFORM_FAILED, "TRANSFORM_ERROR", str(exc)) from exc
+    with np.errstate(invalid="ignore", over="ignore"):
+        error = np.hypot(np.asarray(x) - xy[:, 0], np.asarray(y) - xy[:, 1])
+    if not (np.isfinite(error) & (error <= DOMAIN_TOLERANCE_M / resolved.metres_per_unit)).all():
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "OUTSIDE_PROJECTION_DOMAIN",
+            "Some coordinates (or points on straight edges between them) lie outside the "
+            "projection's valid domain.",
+        )
+
+
+def _to_wgs84(geometry: BaseGeometry, resolved: ResolvedCrs) -> BaseGeometry:
+    try:
+        converted = _apply(geometry, resolved.to_wgs84)
+    except ProjError as exc:
+        raise _Stop(Status.TRANSFORM_FAILED, "TRANSFORM_ERROR", str(exc)) from exc
+    xy = shapely.get_coordinates(converted)
+    if not np.isfinite(xy).all():
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "NON_FINITE_RESULT",
+            "Conversion to WGS84 failed for some coordinates (outside the CRS's domain?).",
+        )
+    if (np.abs(xy[:, 0]) > 180 + RANGE_EPSILON).any() or (
+        np.abs(xy[:, 1]) > 90 + RANGE_EPSILON
+    ).any():
+        raise _Stop(
+            Status.TRANSFORM_FAILED,
+            "COORDINATES_OUT_OF_RANGE",
+            "Longitude/latitude outside [-180, 180] / [-90, 90].",
+        )
+    return converted
+
+
+def _sequences(geometry: BaseGeometry) -> list[np.ndarray]:
+    """Every coordinate sequence (line parts, exterior and interior rings), in order."""
+    if isinstance(geometry, LineString):
+        return [np.asarray(geometry.coords)]
+    if isinstance(geometry, Polygon):
+        return [np.asarray(geometry.exterior.coords)] + [
+            np.asarray(r.coords) for r in geometry.interiors
+        ]
+    return [seq for part in geometry.geoms for seq in _sequences(part)]
+
+
+def _rebuild(geometry: BaseGeometry, sequences: list[np.ndarray]) -> BaseGeometry:
+    """Inverse of ``_sequences``: same structure, new coordinate sequences."""
+    queue = iter(sequences)
+
+    def build(geom: BaseGeometry) -> BaseGeometry:
+        if isinstance(geom, LineString):
+            return LineString(next(queue))
+        if isinstance(geom, Polygon):
+            shell = next(queue)
+            return Polygon(shell, [next(queue) for _ in geom.interiors])
+        parts = [build(part) for part in geom.geoms]
+        return MultiLineString(parts) if isinstance(geom, MultiLineString) else MultiPolygon(parts)
+
+    return build(geometry)
+
+
+def _check_antimeridian(wgs84: BaseGeometry) -> None:
+    for seq in _sequences(wgs84):
+        if (np.abs(np.diff(seq[:, 0])) > 180).any():
+            raise _Stop(
+                Status.UNSUPPORTED_EXTENT,
+                "ANTIMERIDIAN_CROSSING",
+                "The geometry crosses the 180° meridian, which is not supported yet.",
+            )
+
+
+def _centre(wgs84: BaseGeometry) -> tuple[float, float]:
+    point = wgs84.centroid
+    if point.is_empty or not np.isfinite([point.x, point.y]).all():
+        point = wgs84.representative_point()
+    return float(point.x), float(point.y)
+
+
+def _check_extent(wgs84: BaseGeometry, centre: tuple[float, float], max_arc: float) -> None:
+    lon, lat = np.radians(shapely.get_coordinates(wgs84)).T
+    lon0, lat0 = np.radians(centre)
+    cos_arc = np.sin(lat0) * np.sin(lat) + np.cos(lat0) * np.cos(lat) * np.cos(lon - lon0)
+    arc = np.degrees(np.arccos(np.clip(cos_arc, -1.0, 1.0))).max()
+    if arc > max_arc:
+        raise _Stop(
+            Status.UNSUPPORTED_EXTENT,
+            "HEMISPHERE_SCALE",
+            f"A vertex lies {arc:.1f}° from the feature's centre; the limit is {max_arc:g}°.",
+        )
+
+
+def _geodesic_lengths(seq: np.ndarray) -> np.ndarray:
+    _, _, distance = GEOD.inv(seq[:-1, 0], seq[:-1, 1], seq[1:, 0], seq[1:, 1])
+    return np.asarray(distance)
+
+
+def _planar_lengths(seq: np.ndarray) -> np.ndarray:
+    return np.hypot(np.diff(seq[:, 0]), np.diff(seq[:, 1]))
+
+
+def _plan_inserts(
+    geometry: BaseGeometry, lengths: Callable[[np.ndarray], np.ndarray], step: float
+) -> list[np.ndarray]:
+    """Points to insert per segment so no segment is longer than ``step``, as float counts.
+
+    Counts stay floating point until ``_check_capacity`` has bounded them: a finite but huge
+    segment can need more than 2**63 points, and casting that to int64 wraps or saturates
+    depending on the platform.
+    """
+    plans = []
+    # Overflow, 0/0 and x/0 all yield inf or NaN, which _check_capacity refuses.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        for seq in _sequences(geometry):
+            segment = lengths(seq)
+            if not np.isfinite(segment).all():
+                raise _Stop(
+                    Status.UNSUPPORTED_EXTENT,
+                    "NON_FINITE_LENGTH",
+                    "A segment is too long to represent as a finite number in source units.",
+                )
+            plans.append(np.maximum(np.ceil(segment / step) - 1.0, 0.0))
+    return plans
+
+
+def _check_capacity(
+    inserts: list[np.ndarray], original: int, limits: MeasurementLimits, budget: VertexBudget
+) -> None:
+    """Refuse an excessive densification before any point is generated, then make the counts
+    integers. Every count is bounded by the limits here, so the conversion is exact."""
+    generated = float(sum(float(n.sum()) for n in inserts))
+    if not math.isfinite(generated) or original + generated > limits.max_vertices_per_feature:
+        raise _Stop(
+            Status.UNSUPPORTED_EXTENT,
+            "DENSIFICATION_LIMIT",
+            f"Densifying would give {original + generated:.0f} vertices; the per-feature limit "
+            f"is {limits.max_vertices_per_feature}.",
+        )
+    budget.check(generated)
+    for i, counts in enumerate(inserts):
+        inserts[i] = counts.astype(np.int64)
+
+
+def _geodesic_points(start: np.ndarray, end: np.ndarray, count: int) -> list:
+    return GEOD.npts(start[0], start[1], end[0], end[1], count)
+
+
+def _planar_points(start: np.ndarray, end: np.ndarray, count: int) -> np.ndarray:
+    fractions = np.arange(1, count + 1)[:, None] / (count + 1)
+    return start + fractions * (end - start)
+
+
+def _densify(
+    geometry: BaseGeometry,
+    inserts: list[np.ndarray],
+    points: Callable[[np.ndarray, np.ndarray, int], Any],
+) -> BaseGeometry:
+    sequences = []
+    for seq, counts in zip(_sequences(geometry), inserts, strict=True):
+        out = [seq[:1]]
+        for i, count in enumerate(counts):
+            if count:
+                out.append(np.asarray(points(seq[i], seq[i + 1], int(count)), dtype=float))
+            out.append(seq[i + 1 : i + 2])
+        sequences.append(np.vstack(out))
+    return _rebuild(geometry, sequences)
+
+
+def _geodesic_area(wgs84: BaseGeometry) -> float:
+    """Ellipsoidal area, ring by ring, independent of ring orientation."""
+    polygons = [wgs84] if isinstance(wgs84, Polygon) else list(wgs84.geoms)
+    total = 0.0
+    for polygon in polygons:
+        ring_area = [
+            abs(GEOD.polygon_area_perimeter(*ring.xy)[0])
+            for ring in (polygon.exterior, *polygon.interiors)
+        ]
+        total += ring_area[0] - sum(ring_area[1:])
+    return total
+
+
+def _geodesic_length(wgs84: BaseGeometry) -> float:
+    lines = [wgs84] if isinstance(wgs84, LineString) else list(wgs84.geoms)
+    return float(sum(GEOD.line_length(*line.xy) for line in lines))
+
+
+def _geojson(geometry: BaseGeometry) -> dict[str, Any]:
+    return json.loads(shapely.to_geojson(geometry))

@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    platform: linux/amd64
+    image: aereo-geospatial-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - aereo-data:/data  # SQLite database and stored uploads
+    restart: unless-stopped
+
+volumes:
+  aereo-data:

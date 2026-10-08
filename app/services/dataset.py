@@ -22,7 +22,7 @@ class SourceCrs:
     status: CrsStatus
     identifier: str | None  # "EPSG:4326", or the CRS name when no EPSG code matches
     wkt: str | None
-    origin: Literal["KML_SPECIFICATION", "PRJ_FILE", "NONE"]
+    origin: Literal["KML_SPECIFICATION", "PRJ_FILE", "OVERRIDE", "NONE"]
 
 
 @dataclass(frozen=True)
@@ -88,13 +88,16 @@ class FeatureBudget:
 
 def iter_positions(geometry: dict[str, Any]):
     """Yield every coordinate position of a GeoJSON-style geometry."""
-    if geometry["type"] == "GeometryCollection":
-        for part in geometry["geometries"]:
-            yield from iter_positions(part)
+    if geometry.get("type") == "GeometryCollection":
+        for part in geometry.get("geometries") or []:
+            if isinstance(part, dict):
+                yield from iter_positions(part)
         return
-    stack = [geometry["coordinates"]]
+    stack = [geometry.get("coordinates")]
     while stack:
         item = stack.pop()
+        if not isinstance(item, (list, tuple)):
+            continue  # malformed input is reported by the measurement stage, not here
         if item and isinstance(item[0], (int, float)):
             yield item
         else:

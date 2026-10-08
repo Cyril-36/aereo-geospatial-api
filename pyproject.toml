@@ -38,3 +38,5 @@ known-first-party = ["app", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# pyproj's duplicate of what crs.resolve() reports as NON_BEST_TRANSFORMATION.
+filterwarnings = ["ignore:Best transformation is not available:UserWarning"]

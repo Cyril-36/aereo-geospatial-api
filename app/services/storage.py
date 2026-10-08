@@ -29,7 +29,9 @@ def display_filename(filename: str | None) -> str:
 
 def classify_filename(filename: str | None) -> FileFormat:
     """Map the declared extension to a format. Content is validated later by the readers."""
-    suffix = PurePosixPath(display_filename(filename)).suffix.lower()
+    # Not PurePosixPath.suffix: it is empty for a name like ".kml" (a "hidden" file).
+    name = display_filename(filename).lower()
+    suffix = name[name.rfind(".") :] if "." in name else ""
     if suffix == ".kmz":
         raise IngestionError(
             "KMZ_UNSUPPORTED",

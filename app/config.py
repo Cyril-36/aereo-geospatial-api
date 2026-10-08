@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     # Multipart framing allowance on top of the file itself, for the request-body guard.
     multipart_overhead_bytes: int = 64 * 1024
 
+    # Measurement.
+    densify_max_segment_m: float = 50_000.0
+    max_vertices_per_feature: int = 200_000  # original + densified, per feature
+    geodesic_relative_tolerance: float = 0.001  # GEODESIC_DISAGREEMENT above 0.1 %
+
+    # API.
+    default_page_size: int = 100
+    max_page_size: int = 1_000
+    max_source_crs_chars: int = 20_000
+
     max_concurrent_processing: int = 2
 
     @property

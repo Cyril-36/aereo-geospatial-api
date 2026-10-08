@@ -17,6 +17,10 @@ def test_display_name_precedence():
     assert display_name({}, None, 3) == "Feature 3"
     assert display_name({}, "  ", 4) == "Feature 4"
     assert display_name({"name": 17}, None, 0) == "17"
+    assert display_name({"TITLE": "Plot 4"}, "f1", 0) == "Plot 4"
+    assert display_name({"land_use": "x", "parcel_id": "P-001"}, "0", 0) == "P-001"
+    assert display_name({"ID": 7, "label": "North"}, "0", 0) == "North"
+    assert display_name({"valid": "yes", "paid": "no"}, "3", 3) == "3"  # not id-like keys
 
 
 def test_normalize_is_unicode_aware():

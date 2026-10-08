@@ -3,9 +3,11 @@
 import { api, ApiError } from "./api.js";
 import { h, clear, toast } from "./dom.js";
 import * as fmt from "./format.js";
-import { isNavigation, navigate, queryParams } from "./router.js";
+import { isNavigation, navigate, queryParams, updateQuery } from "./router.js";
 import { nextGeneration, isAbort } from "./state.js";
 import { prepareReupload } from "./upload.js";
+import { mountTable } from "./table.js";
+import { renderDetails } from "./details.js";
 
 let configCache = null;
 
@@ -281,20 +283,38 @@ function buildOverview(info, config, gen, cleanups) {
       ),
     );
   }
-  section.append(body, h("div", { class: "work" }, h("div", { id: "table-region", class: "work-table" }), h("div", { id: "map-region", class: "work-side" })));
+  const tableRegion = h("div", { id: "table-region", class: "work-table" });
+  const sideRegion = h("div", { id: "side-region", class: "work-side" });
+  section.append(body, h("div", { class: "work" }, tableRegion, sideRegion));
+
+  let totals = null;
+  let units = { au: areaUnit, lu: lengthUnit };
+  const showSums = () => {
+    if (!totals) return;
+    areaSum.textContent = `${fmt.area(totals.area, units.au)} ${fmt.AREA_UNITS[units.au].label}`;
+    lengthSum.textContent = `${fmt.length(totals.length, units.lu)} ${fmt.LENGTH_UNITS[units.lu].label}`;
+  };
+  if (counts.total > 0) {
+    cleanups.push(
+      mountWorkspace(info, config, tableRegion, sideRegion, (next) => {
+        units = next;
+        showSums();
+      }),
+    );
+  }
 
   if (counts.measured > 0) {
     sums(info.id, config, gen.signal)
       .then((s) => {
         if (!gen.isCurrent()) return;
+        totals = s;
+        showSums();
         if (s.areas) {
-          areaSum.textContent = `${fmt.area(s.area, areaUnit)} ${fmt.AREA_UNITS[areaUnit].label}`;
           areaFact.append(h("span", { class: "small" }, ` (${s.areas} measured ${s.areas === 1 ? "polygon" : "polygons"})`));
           areaFact.hidden = false;
           overlapNote.hidden = false;
         }
         if (s.lengths) {
-          lengthSum.textContent = `${fmt.length(s.length, lengthUnit)} ${fmt.LENGTH_UNITS[lengthUnit].label}`;
           lengthFact.append(h("span", { class: "small" }, ` (${s.lengths} measured ${s.lengths === 1 ? "line" : "lines"})`));
           lengthFact.hidden = false;
         }
@@ -306,4 +326,102 @@ function buildOverview(info, config, gen, cleanups) {
       });
   }
   return section;
+}
+
+// Table, details and (from Task 9) map for a completed file, kept in sync through one
+// selected feature index that also lives in the URL as ?feature=.
+function mountWorkspace(info, config, tableRegion, sideRegion, onUnits) {
+  const detailsPanel = h("aside", { id: "details", class: "details", hidden: true, "aria-labelledby": "details-title" });
+  sideRegion.append(detailsPanel);
+  let selectedIndex = null;
+  let selectedFeature = null;
+  const narrow = window.matchMedia("(max-width: 720px)");
+
+  const table = mountTable(tableRegion, {
+    fileId: info.id,
+    info,
+    config,
+    onSelect: (feature) => selectFeature(feature, { push: true }),
+    onFiltersChanged: () => refreshHidden(),
+    onUnitsChanged: (units) => {
+      if (selectedFeature) showDetails(selectedFeature);
+      onUnits(units);
+    },
+  });
+
+  function showDetails(feature) {
+    renderDetails(detailsPanel, feature, { units: table.units(), onClose: close });
+    detailsPanel.classList.toggle("sheet", narrow.matches);
+  }
+
+  function selectFeature(feature, { push }) {
+    selectedIndex = feature.index;
+    selectedFeature = feature;
+    table.setSelected(feature.index);
+    table.setHiddenNotice(false);
+    showDetails(feature);
+    updateQuery({ feature: feature.index }, { push });
+    if (narrow.matches) detailsPanel.querySelector("h2").focus();
+  }
+
+  function close() {
+    const index = selectedIndex;
+    selectedIndex = null;
+    selectedFeature = null;
+    detailsPanel.hidden = true;
+    clear(detailsPanel);
+    table.setSelected(null);
+    table.setHiddenNotice(false);
+    updateQuery({ feature: "" }, { push: true });
+    if (index !== null && !table.focusRow(index)) document.getElementById("feature-table")?.focus();
+  }
+
+  async function refreshHidden() {
+    if (selectedIndex === null) return;
+    const index = selectedIndex;
+    try {
+      const position = await api.getPosition(info.id, index, { ...table.params(), limit: table.pageSize });
+      if (selectedIndex === index) table.setHiddenNotice(!position.matches);
+    } catch {
+      // the notice is a hint; the table itself is unaffected
+    }
+  }
+
+  async function featureAt(index) {
+    const page = await api.getMeasurements(info.id, { limit: 1, offset: index });
+    return page.features[0] || null;
+  }
+
+  async function openIndex(index, { push }) {
+    try {
+      const position = await api.getPosition(info.id, index, { ...table.params(), limit: table.pageSize });
+      let feature = null;
+      if (position.matches) {
+        await table.showOffset(position.page_offset);
+        feature = table.rowFor(index);
+      }
+      feature = feature || (await featureAt(index));
+      if (!feature) return;
+      selectFeature(feature, { push });
+      if (!position.matches) table.setHiddenNotice(true);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "FEATURE_NOT_FOUND") updateQuery({ feature: "" });
+    }
+  }
+
+  const onKey = (event) => {
+    if (event.key === "Escape" && selectedIndex !== null && !document.querySelector("dialog[open]")) close();
+  };
+  document.addEventListener("keydown", onKey);
+
+  (async () => {
+    await table.load();
+    const raw = queryParams().get("feature");
+    if (raw !== null && /^\d+$/.test(raw)) await openIndex(Number(raw), { push: false });
+  })();
+
+  return () => {
+    document.removeEventListener("keydown", onKey);
+    table.destroy();
+  };
 }

@@ -182,3 +182,21 @@ const ORIGIN = {
 export function crsOrigin(origin) {
   return ORIGIN[origin] || "";
 }
+
+// Same precedence as the server's display_name (app/services/search.py): a name-like
+// attribute, else an ID-like one (id, *_id), else the source ID.
+const NAME_KEYS = ["name", "title", "label"];
+const present = (v) => v !== null && v !== undefined && String(v).trim() !== "";
+
+export function featureName(feature) {
+  const props = feature.properties || {};
+  const folded = {};
+  for (const [key, value] of Object.entries(props).reverse()) folded[key.toLowerCase()] = value;
+  for (const key of NAME_KEYS) if (present(folded[key])) return String(folded[key]).trim();
+  for (const [key, value] of Object.entries(props)) {
+    const k = key.toLowerCase();
+    if ((k === "id" || k.endsWith("_id") || k.endsWith("-id")) && present(value)) return String(value).trim();
+  }
+  if (present(feature.source_id)) return String(feature.source_id);
+  return `Feature ${feature.index}`;
+}

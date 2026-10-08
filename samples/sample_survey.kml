@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Sample site survey</name>
+    <Folder>
+      <name>Block A</name>
+      <Placemark id="field-1">
+        <name>Field 1</name>
+        <ExtendedData>
+          <Data name="crop"><value>ragi</value></Data>
+          <Data name="surveyor"><value>Team 3</value></Data>
+        </ExtendedData>
+        <Polygon><outerBoundaryIs><LinearRing><coordinates>
+          77.5900,12.9700 77.5920,12.9700 77.5920,12.9720 77.5900,12.9720 77.5900,12.9700
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark id="road-1">
+        <name>Access road</name>
+        <LineString><coordinates>
+          77.5880,12.9690 77.5950,12.9690 77.5980,12.9740
+        </coordinates></LineString>
+      </Placemark>
+      <Placemark id="well-1">
+        <name>Borewell</name>
+        <ExtendedData><Data name="depth_m"><value>60</value></Data></ExtendedData>
+        <Point><coordinates>77.5910,12.9710</coordinates></Point>
+      </Placemark>
+    </Folder>
+  </Document>
+</kml>

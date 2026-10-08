@@ -25,6 +25,7 @@ def test_history_persists_across_restart_and_reopens(page_ok, server):
 def test_history_search_and_status_filter(page_ok, server):
     upload_via_ui(page_ok, server, SAMPLES / "sample_survey.kml")
     upload_via_ui(page_ok, server, SAMPLES / "sample_parcels.zip", crs="EPSG:4326")  # fails
+    expect(page_ok.locator("#upload-outcome")).to_contain_text("CRS_CONFLICT")
     page_ok.goto(server.base_url + "/history")
     page_ok.select_option("#h-status", "FAILED")
     expect(page_ok.locator("#history-table tbody tr")).to_have_count(1)

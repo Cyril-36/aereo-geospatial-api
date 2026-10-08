@@ -106,8 +106,13 @@ def page_ok(page, server):
 
 
 def upload_via_ui(page, server, path: Path, crs: str | None = None) -> None:
+    """Wait for a completed result or explicit upload outcome before the next action."""
     page.goto(server.base_url + "/")
     page.set_input_files("#file-input", str(path))
     if crs:
         page.fill("#crs-input", crs)
     page.click("#submit-upload")
+    # Clicking only starts XHR. Navigating immediately can query history while the
+    # record is still PROCESSING, so a FAILED filter legitimately returns no rows.
+    page.wait_for_function("""() => location.pathname.startsWith('/files/') ||
+        Boolean(document.querySelector('#upload-outcome')?.textContent.trim())""")

@@ -7,9 +7,10 @@ from sqlalchemy import update
 
 from app.api.files import router as files_router
 from app.config import Settings, get_settings
-from app.database import Base, make_engine, make_session_factory
+from app.database import make_engine, make_session_factory
 from app.errors import install_error_handlers
 from app.middleware import BodySizeLimitMiddleware
+from app.migrations import migrate
 from app.models import FileRecord, FileStatus, utcnow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -41,7 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         for directory in (settings.data_dir, settings.upload_dir, settings.work_dir):
             directory.mkdir(parents=True, exist_ok=True)
-        Base.metadata.create_all(engine)
+        migrate(engine)
         recover_interrupted(session_factory)
         yield
         engine.dispose()

@@ -9,7 +9,8 @@ release would silently lack new columns. Instead:
 - each pending version runs in one transaction with its version row, so a failure leaves
   the database exactly as it was.
 
-Migrations only add things; no row or column is ever dropped or rewritten. Legacy data policy:
+Migrations only add things; no row or column is ever dropped, and no existing value is
+rewritten (version 3 fills only the columns it adds). Legacy data policy:
 files stored by the extraction-only first release keep status EXTRACTED and NULL measurement
 fields. They are not relabelled COMPLETED, because they were never measured; re-uploading the
 original file measures it.
@@ -18,6 +19,7 @@ Run ``python -m app.migrations`` to upgrade explicitly; the application also upg
 """
 
 import datetime as dt
+import json
 import logging
 from collections.abc import Callable
 
@@ -61,6 +63,10 @@ V2_COLUMNS = {
 }  # fmt: skip
 
 
+# Columns added by version 3 (feature search and sort keys), backfilled from existing rows.
+V3_COLUMNS = {"features": ["display_name", "sort_name", "search_text", "warning_count"]}
+
+
 class MigrationError(RuntimeError):
     pass
 
@@ -82,9 +88,33 @@ def _v2_measurements(conn: Connection) -> None:
     _add_columns(conn, V2_COLUMNS)
 
 
+def _v3_search_columns(conn: Connection) -> None:
+    from app.services.search import display_name, normalize, search_text
+
+    _add_columns(conn, V3_COLUMNS)
+    rows = conn.exec_driver_sql(
+        'SELECT id, "index", source_id, properties, warnings FROM features'
+    ).fetchall()
+    for row_id, index, source_id, properties_json, warnings_json in rows:
+        properties = json.loads(properties_json) if properties_json else {}
+        name = display_name(properties, source_id, index)
+        conn.exec_driver_sql(
+            "UPDATE features SET display_name = ?, sort_name = ?, search_text = ?, "
+            "warning_count = ? WHERE id = ?",
+            (
+                name,
+                normalize(name),
+                search_text(name, source_id, properties),
+                len(json.loads(warnings_json)) if warnings_json else 0,
+                row_id,
+            ),
+        )
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[Connection], None] | None]] = [
     (1, "files and features (extraction)", None),  # baseline, created by the first release
     (2, "feature measurement results", _v2_measurements),
+    (3, "feature search and sort keys", _v3_search_columns),
 ]
 LATEST = MIGRATIONS[-1][0]
 

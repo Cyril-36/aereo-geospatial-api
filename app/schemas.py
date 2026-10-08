@@ -1,7 +1,7 @@
 import datetime as dt
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 
 class Message(BaseModel):
@@ -81,3 +81,38 @@ class MeasurementsPage(BaseModel):
     counts: dict[str, int]
     pagination: Pagination
     features: list[FeatureMeasurement]
+
+    query: dict[str, Any] | None = Field(
+        None, description="Normalised filters and sort; present only when the request used them"
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_query(self, handler):
+        data = handler(self)
+        if self.query is None:
+            data.pop("query", None)  # requests without the new parameters keep their exact body
+        return data
+
+
+class HistoryPage(BaseModel):
+    pagination: Pagination
+    files: list[FileInfo]
+
+
+class PositionOut(BaseModel):
+    index: int
+    matches: bool = Field(description="False when the feature exists but the filters exclude it")
+    position: int | None = Field(description="0-based rank in the filtered, sorted list")
+    page_offset: int | None = Field(description="Offset of the page that contains the feature")
+    limit: int
+
+
+class ConfigOut(BaseModel):
+    max_upload_bytes: int
+    max_features: int
+    default_page_size: int
+    max_page_size: int
+    accepted_extensions: list[str]
+    map_tile_url: str = Field(description="Basemap tile URL template; empty when disabled")
+    map_max_features: int = Field(description="Features drawn on the map before it is partial")
+    map_max_vertices: int = Field(description="Vertices drawn on the map before it is partial")

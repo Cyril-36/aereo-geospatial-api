@@ -2,18 +2,20 @@
 
 A FastAPI service that accepts a zipped Shapefile or a KML file, extracts its features, resolves the
 coordinate reference system (CRS), measures polygon area and line length, and returns the results
-through a small REST API.
+through a small REST API and an interactive web workspace.
 
 Every feature is reported with an explicit status. A file can finish processing (`COMPLETED`) while some
 of its features are skipped or invalid, and the response says which ones and why. Coordinates are never
 measured in degrees, and a missing CRS is never guessed.
 
 **Stack:** Python 3.12, FastAPI, Fiona (GDAL), Shapely 2, pyproj (PROJ), SQLAlchemy 2 + SQLite,
-defusedxml, pytest, Ruff, uv, Docker, GitHub Actions.
+defusedxml, plain HTML/CSS/JavaScript, bundled Leaflet 1.9.4, pytest/Playwright, Ruff, uv, Docker,
+GitHub Actions. The frontend needs no Node build or separate service.
 
 ## Contents
 
 - [Quick start](#quick-start)
+- [Web workspace](#web-workspace)
 - [API](#api)
 - [Architecture](#architecture)
 - [Measurement methodology](#measurement-methodology)
@@ -36,7 +38,8 @@ uv sync --frozen                      # exact dependency versions from uv.lock
 uv run uvicorn app.main:app --port 8000
 ```
 
-Open <http://127.0.0.1:8000/docs> for the interactive OpenAPI documentation, then try a sample:
+Open <http://127.0.0.1:8000/> for the workspace, or <http://127.0.0.1:8000/docs> for the
+interactive OpenAPI documentation. Try a sample:
 
 ```bash
 curl -F file=@samples/sample_parcels.zip http://127.0.0.1:8000/api/files/
@@ -82,6 +85,51 @@ All settings are environment variables with the `AEREO_` prefix (see `app/config
 | `AEREO_DENSIFY_MAX_SEGMENT_M` | 50,000 | Longest edge segment before densifying, in metres |
 | `AEREO_MAX_VERTICES_PER_FEATURE` | 200,000 | Vertices per feature after densification |
 | `AEREO_MAX_PAGE_SIZE` | 1,000 | Largest `limit` for the measurements endpoint |
+| `AEREO_MAP_TILE_URL` | OSM standard tile URL | Basemap template; empty disables external tiles |
+| `AEREO_MAP_MAX_FEATURES` | 5,000 | Features inspected in the initial map preview |
+| `AEREO_MAP_MAX_VERTICES` | 250,000 | Vertices drawn in the initial map preview |
+| `AEREO_HISTORY_DEFAULT_PAGE_SIZE` | 50 | Default history page size |
+| `AEREO_HISTORY_MAX_PAGE_SIZE` | 200 | Maximum history page size |
+| `AEREO_MAX_SEARCH_CHARS` | 200 | Maximum feature/history search length |
+
+## Web workspace
+
+Use the same local or Docker startup commands above, then open <http://127.0.0.1:8000/>.
+
+- **Upload (`/`):** choose or drop a ZIP/KML, optionally supply the source CRS, and see real
+  upload progress followed by an indeterminate processing state. Ambiguous connection failures
+  offer a history check before resubmission; uploads are never automatically retried.
+- **Results (`/files/{id}`):** inspect statuses, warning explanations, properties and measurement
+  details. Search and sort the complete dataset, page through it, switch display units and select
+  features through the table or map. Filters, page and selection survive refresh and Back/Forward.
+- **History (`/history`):** search by filename/ID, filter by status or format, reopen results and
+  confirm deletion. History is stored in SQLite and survives application restarts.
+- **Downloads:** CSV contains measurements, statuses and warnings; JSON also includes attributes,
+  geometry, CRS and transformation metadata. Choose all features or the filtered set. Every matching
+  feature is exported across all pages, with full numeric precision and canonical m²/metre units.
+
+The map is an informational preview; its drawing never supplies measurements. Only supported,
+usable geometry labelled EPSG:4326 is plotted. Invalid but drawable boundaries can be inspected
+with their unsuccessful measurement status; unknown/projected source coordinates are not guessed.
+The map reports skipped features and limits, loads incrementally, and remains independent of the
+table. Initial loading stops at the configured feature/vertex budgets; **Load more** raises those
+budgets once, up to twice their configured values. Vertex checks occur after receiving a page.
+Changing filters, files or routes cancels old loads. The sums of feature areas/lengths include
+measured features only; overlapping polygons are not merged into a land footprint.
+
+Leaflet and its license are bundled locally. The default basemap uses OpenStreetMap with visible
+attribution and browser caching; follow the [OSM tile policy](https://operations.osmfoundation.org/policies/tiles/).
+To run without external tiles, set `AEREO_MAP_TILE_URL=""`. Measurements and vectors still work if
+the basemap is unavailable. Browser tests disable tiles and reject external requests.
+
+Deletion removes the database record and features, then the stored upload. After an I/O error,
+upload cleanup may be pending even though the API no longer serves the record. Startup cleanup
+retries orphan uploads older than ten minutes; recent files are retained to protect active uploads.
+An export uses one WAL read snapshot, so deletion during streaming leaves the download complete.
+
+This is a single shared workspace with no authentication or per-user ownership, intended for the
+assignment/local demo. Existing requests to the three required endpoints preserve their original
+responses; feature query changes are opt-in and covered by compatibility snapshots.
 
 ## API
 
@@ -90,6 +138,50 @@ All settings are environment variables with the `AEREO_` prefix (see `app/config
 | `POST` | `/api/files/` | Upload and process a file |
 | `GET` | `/api/files/{id}/` | File information and per-status feature counts |
 | `GET` | `/api/files/{id}/measurements/` | Paginated per-feature results |
+| `GET` | `/api/config/` | Configured upload, pagination and map limits |
+| `GET` | `/api/files/` | Persistent, paginated upload history |
+| `DELETE` | `/api/files/{id}/` | Delete a file and its results |
+| `GET` | `/api/files/{id}/features/{index}/position/` | Locate a feature in filtered/sorted results |
+| `GET` | `/api/files/{id}/export/` | Stream complete CSV or JSON results |
+
+### Workspace API additions
+
+```bash
+curl http://127.0.0.1:8000/api/config/
+curl 'http://127.0.0.1:8000/api/files/?q=survey&status=COMPLETED&limit=50'
+curl 'http://127.0.0.1:8000/api/files/FILE_ID/measurements/?q=industrial&sort=name&order=asc'
+curl 'http://127.0.0.1:8000/api/files/FILE_ID/features/240/position/?sort=name&limit=100'
+curl -OJ 'http://127.0.0.1:8000/api/files/FILE_ID/export/?format=csv&status=attention'
+curl -OJ 'http://127.0.0.1:8000/api/files/FILE_ID/export/?format=json'
+curl -X DELETE http://127.0.0.1:8000/api/files/FILE_ID/
+```
+
+Replace `FILE_ID` with the upload response ID. History accepts `q`, `status`, `format`, `limit`,
+`offset` and `since` (an ISO timestamp with a timezone). Search normalises Unicode and is case
+insensitive; newest records come first.
+
+Measurements, position and export share these optional query parameters:
+
+| Parameter | Values |
+|---|---|
+| `q` | Substring of feature name, source ID or property keys/values |
+| `geometry` | `polygon`, `line`, `point`, `other` |
+| `status` | `measured`, `not_applicable`, `attention`, or a raw feature status |
+| `warnings` | `with`, `without` |
+| `sort` | `index`, `name`, `status`, `area`, `length`, `warnings` |
+| `order` | `asc`, `desc` |
+
+Missing sort values come last in either direction, with index breaking ties. Filtered
+`pagination.total` counts matches; `feature_count` and `counts` remain whole-file values.
+The `query` echo appears only when a new query parameter is supplied. Repeated parameters are
+rejected. Position returns `matches`, the zero-based rank and `page_offset`; a filtered-out feature
+has null rank/offset. Exports require `format=csv|json`, share the filters/sort, and ignore pagination.
+
+CSV columns: `index`, `source_id`, `name`, `geometry_type`, `status`, `reason_code`, `reason`,
+`area_m2`, `length_m`, `measurement_method`, `measurement_crs`, `geodesic_relative_difference`,
+`warning_codes`, `warning_messages`, `folder_path`. UTF-8 with a BOM preserves non-ASCII text in
+spreadsheets. Formula-like text is prefixed with an apostrophe; numeric measurements are unchanged.
+JSON includes file metadata, export scope/filter/unit information and complete feature results.
 
 The responses below are from a real run of the Docker image with the files in [`samples/`](samples/).
 
@@ -449,9 +541,11 @@ Every non-`MEASURED` feature has a `reason_code` and a human-readable `reason`.
 
 ```bash
 uv run pytest
+uv run playwright install chromium
+uv run pytest -m e2e
 ```
 
-The suite (329 tests) uses real files throughout: Shapefiles written with Fiona, real KML documents, and
+The backend suite uses real files throughout: Shapefiles written with Fiona, real KML documents, and
 a database dump written by the first release for the migration tests. Measured values are compared with
 independent references rather than with the code under test:
 
@@ -461,7 +555,13 @@ independent references rather than with the code under test:
 
 Failure paths are tested by injecting faults: database errors, a process crash between building and
 committing results, corrupted archives, and non-finite numbers. CI (GitHub Actions) runs Ruff, the tests
-and a Docker smoke test with the sample files on pushes and pull requests.
+and a Docker smoke test with the sample files on pushes and pull requests. A separate browser job
+runs Chromium against an isolated uvicorn and temporary database. It verifies upload, both formats,
+invalid inputs, filtering, map selection/limits, complete downloads, deletion, restart persistence,
+keyboard access, mobile layout, refresh and Back/Forward navigation.
+Compatibility snapshots were captured from the audited pre-UI backend separately on macOS/arm64
+and Linux/amd64, because PROJ's final decimal digits differ between platforms; comparisons stay
+byte-exact after normalising UUIDs and timestamps.
 
 ## Learnings
 

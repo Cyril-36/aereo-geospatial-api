@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main, "feat/**", "Cyril/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "fix/**"]
 
 permissions:
   contents: read
@@ -29,6 +29,21 @@ jobs:
         run: uv run ruff format --check .
       - name: Tests
         run: uv run pytest
+
+  e2e:
+    name: Browser tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.8.8"
+      - run: uv sync --frozen
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest -m e2e
 
   docker:
     name: Docker image (linux/amd64)
@@ -64,6 +79,11 @@ jobs:
           check sample_survey.kml "" '{"MEASURED": 2, "NOT_APPLICABLE": 1}'
           check sample_missing_crs.zip "" '{"UNKNOWN_CRS": 3}'
           check sample_missing_crs.zip EPSG:32643 '{"MEASURED": 3}'
+          check sample_invalid_geometry.kml "" '{"INVALID_GEOMETRY": 2, "MEASURED": 1, "NOT_APPLICABLE": 1, "UNSUPPORTED_GEOMETRY": 1}'
+          check sample_many_parcels.zip "" '{"MEASURED": 250}'
+          curl -sf http://127.0.0.1:8000/ | python3 -c 'import sys; assert "<main id=\"app\"" in sys.stdin.read()'
+          curl -sf -o /dev/null http://127.0.0.1:8000/static/js/main.js
+          curl -sf -o /dev/null http://127.0.0.1:8000/static/vendor/leaflet/leaflet.js
       - name: Container logs
         if: always()
         run: docker logs api

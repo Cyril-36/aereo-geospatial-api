@@ -21,6 +21,7 @@ from app.models import FeatureRecord, FileRecord
 from app.services.crs import WGS84
 from app.services.measurements import AREA_TYPES, LENGTH_TYPES, FeatureMeasurement, Status
 from app.services.processor import ProcessedFile
+from app.services.search import fill_search_columns
 
 
 class InconsistentResultError(RuntimeError):
@@ -117,6 +118,8 @@ def apply_results(record: FileRecord, processed: ProcessedFile) -> None:
         )
         for raw, result in zip(dataset.features, measured.features, strict=True)
     ]
+    for feature in record.features:
+        fill_search_columns(feature)
 
 
 def geometry_out(feature: FeatureRecord) -> tuple[dict | None, str | None, str | None]:

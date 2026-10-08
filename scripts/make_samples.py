@@ -45,7 +45,29 @@ def parcels() -> list[dict]:
     ]
 
 
-def shapefile_zip(path: Path, with_prj: bool) -> None:
+def many_parcels() -> list[dict]:
+    """250 small parcels on a 25 x 10 grid: enough for several pages of results."""
+    x, y = utm_origin()
+    uses = ("residential", "agricultural", "industrial")
+    return [
+        {
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [rect(x + (i % 25) * 60, y + (i // 25) * 60, 50, 50)],
+            },
+            "properties": {
+                "parcel_id": f"M-{i + 1:03d}",
+                "land_use": uses[i % 3],
+                "survey_no": 1000 + i,
+            },
+        }
+        for i in range(250)
+    ]
+
+
+def shapefile_zip(
+    path: Path, with_prj: bool, records: list[dict] | None = None, folder: str = "parcels"
+) -> None:
     schema = {
         "geometry": "Polygon",
         "properties": {"parcel_id": "str:10", "land_use": "str:20", "survey_no": "int"},
@@ -55,14 +77,14 @@ def shapefile_zip(path: Path, with_prj: bool) -> None:
         with fiona.open(
             shp, "w", driver="ESRI Shapefile", schema=schema, crs="EPSG:32643", encoding="UTF-8"
         ) as dst:
-            for record in parcels():
+            for record in records or parcels():
                 dst.write(fiona.Feature.from_dict(record))
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for part in sorted(Path(tmp).glob("parcels.*")):
                 if part.suffix == ".prj" and not with_prj:
                     continue
-                info = zipfile.ZipInfo(f"parcels/{part.name}", FIXED_TIME)
+                info = zipfile.ZipInfo(f"{folder}/{part.name}", FIXED_TIME)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 zf.writestr(info, part.read_bytes())
         path.write_bytes(buffer.getvalue())
@@ -101,10 +123,55 @@ KML = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+INVALID_KML = """<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Invalid geometry sample</name>
+    <Placemark>
+      <name>Valid field</name>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>
+        77.5900,12.9700 77.5920,12.9700 77.5920,12.9720 77.5900,12.9720 77.5900,12.9700
+      </coordinates></LinearRing></outerBoundaryIs></Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Unclosed plot</name>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>
+        77.5930,12.9700 77.5950,12.9700 77.5950,12.9720 77.5930,12.9720
+      </coordinates></LinearRing></outerBoundaryIs></Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Bow-tie boundary</name>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>
+        77.5960,12.9700 77.5980,12.9720 77.5980,12.9700 77.5960,12.9720 77.5960,12.9700
+      </coordinates></LinearRing></outerBoundaryIs></Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Pump house</name>
+      <Point><coordinates>77.5905,12.9735</coordinates></Point>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>
+        77.5900,12.9730 77.5910,12.9730 77.5910,12.9740 77.5900,12.9740 77.5900,12.9730
+      </coordinates></LinearRing></outerBoundaryIs></Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Borewell</name>
+      <Point><coordinates>77.5940,12.9740</coordinates></Point>
+    </Placemark>
+  </Document>
+</kml>
+"""
+
+
 if __name__ == "__main__":
     OUT.mkdir(exist_ok=True)
     shapefile_zip(OUT / "sample_parcels.zip", with_prj=True)
     shapefile_zip(OUT / "sample_missing_crs.zip", with_prj=False)
     (OUT / "sample_survey.kml").write_text(KML, encoding="utf-8")
+    (OUT / "sample_invalid_geometry.kml").write_text(INVALID_KML, encoding="utf-8")
+    shapefile_zip(
+        OUT / "sample_many_parcels.zip",
+        with_prj=True,
+        records=many_parcels(),
+        folder="many_parcels",
+    )
     for p in sorted(OUT.glob("sample_*")):
         print(f"{p.name}: {p.stat().st_size} bytes")

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, Up
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.params import FeatureQuery, feature_query, filter_clauses, order_clauses
 from app.database import get_db
 from app.errors import ApiError, IngestionError
 from app.models import FeatureRecord, FileRecord, FileStatus, utcnow
@@ -15,7 +16,14 @@ from app.results import (
     geodesic_reference,
     geometry_out,
 )
-from app.schemas import FeatureMeasurement, FileInfo, MeasurementsPage, Message, Pagination
+from app.schemas import (
+    FeatureMeasurement,
+    FileInfo,
+    MeasurementsPage,
+    Message,
+    Pagination,
+    PositionOut,
+)
 from app.services.crs import parse_override
 from app.services.processor import process
 from app.services.storage import classify_filename, display_filename, save_stream
@@ -239,20 +247,7 @@ def reject_duplicate_query_parameters(request: Request) -> None:
             )
 
 
-@router.get(
-    "/files/{file_id}/measurements/",
-    response_model=MeasurementsPage,
-    dependencies=[Depends(reject_duplicate_query_parameters)],
-)
-def get_measurements(
-    request: Request,
-    file_id: str,
-    limit: int | None = Query(None, description="Page size (default 100, maximum 1000)"),
-    offset: int = Query(0, description="Number of features to skip, in index order"),
-    db: Session = Depends(get_db),
-) -> MeasurementsPage:
-    settings = request.app.state.settings
-    record = _get_record(db, file_id)
+def _require_completed(record: FileRecord) -> None:
     if record.status == FileStatus.PROCESSING:
         raise ApiError(409, "FILE_NOT_READY", "The file is still being processed.", record.id)
     if record.status == FileStatus.FAILED:
@@ -271,25 +266,47 @@ def get_measurements(
             record.id,
         )
 
+
+def _page_limit(settings, limit: int | None) -> int:
     if limit is None:
         limit = min(settings.default_page_size, settings.max_page_size)
     if not 1 <= limit <= settings.max_page_size:
         raise ApiError(
             422, "INVALID_PAGINATION", f"limit must be between 1 and {settings.max_page_size}."
         )
+    return limit
+
+
+@router.get(
+    "/files/{file_id}/measurements/",
+    response_model=MeasurementsPage,
+    dependencies=[Depends(reject_duplicate_query_parameters)],
+)
+def get_measurements(
+    request: Request,
+    file_id: str,
+    limit: int | None = Query(None, description="Page size (default 100, maximum 1000)"),
+    offset: int = Query(0, description="Number of features to skip, in index order"),
+    fq: FeatureQuery = Depends(feature_query),
+    db: Session = Depends(get_db),
+) -> MeasurementsPage:
+    """Optional q, geometry, status, warnings, sort and order filter and sort the whole file;
+    pagination.total then counts matching features and the response echoes ``query``."""
+    record = _get_record(db, file_id)
+    _require_completed(record)
+    limit = _page_limit(request.app.state.settings, limit)
     if offset < 0:
         raise ApiError(422, "INVALID_PAGINATION", "offset must be 0 or greater.")
 
-    total = db.scalar(
-        select(func.count()).select_from(FeatureRecord).where(FeatureRecord.file_id == record.id)
-    )
+    clauses = filter_clauses(record.id, fq)
+    total = db.scalar(select(func.count()).select_from(FeatureRecord).where(*clauses))
     # Past the end there is nothing to fetch; this also keeps offsets beyond SQLite's
     # 64-bit integer range out of the query.
     features = (
         db.scalars(
             select(FeatureRecord)
-            .where(FeatureRecord.file_id == record.id)
-            .order_by(FeatureRecord.index)
+            .where(*clauses)
+            .order_by(*order_clauses(fq))
             .limit(limit)
             .offset(offset)
         ).all()
@@ -311,4 +328,50 @@ def get_measurements(
             next_offset=offset + returned if offset + returned < total else None,
         ),
         features=[_feature_out(f) for f in features],
+        query=fq.echo() if fq.present else None,
+    )
+
+
+@router.get(
+    "/files/{file_id}/features/{index}/position/",
+    response_model=PositionOut,
+    dependencies=[Depends(reject_duplicate_query_parameters)],
+)
+def get_position(
+    request: Request,
+    file_id: str,
+    index: int,
+    limit: int | None = Query(None, description="Page size used to compute page_offset"),
+    fq: FeatureQuery = Depends(feature_query),
+    db: Session = Depends(get_db),
+) -> PositionOut:
+    """Where a feature sits in the filtered, sorted list, so a client can open its page."""
+    record = _get_record(db, file_id)
+    _require_completed(record)
+    limit = _page_limit(request.app.state.settings, limit)
+    exists = db.scalar(
+        select(func.count())
+        .select_from(FeatureRecord)
+        .where(FeatureRecord.file_id == record.id, FeatureRecord.index == index)
+    )
+    if not exists:
+        raise ApiError(404, "FEATURE_NOT_FOUND", f"No feature {index} in this file.", record.id)
+    ranked = (
+        select(
+            FeatureRecord.index.label("idx"),
+            func.row_number().over(order_by=order_clauses(fq)).label("rn"),
+        )
+        .where(*filter_clauses(record.id, fq))
+        .subquery()
+    )
+    rank = db.scalar(select(ranked.c.rn).where(ranked.c.idx == index))
+    if rank is None:
+        return PositionOut(index=index, matches=False, position=None, page_offset=None, limit=limit)
+    position = rank - 1
+    return PositionOut(
+        index=index,
+        matches=True,
+        position=position,
+        page_offset=position - position % limit,
+        limit=limit,
     )

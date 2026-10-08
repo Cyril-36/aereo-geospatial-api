@@ -9,6 +9,8 @@ is an arbitrary location near Bengaluru. Regenerate them with
 | `sample_parcels.zip` | One Shapefile (`.shp .shx .dbf .prj .cpg`): three parcels, one with a hole | EPSG:32643 (WGS 84 / UTM 43N, metres), from the `.prj` | `COMPLETED`, 3 × `MEASURED` |
 | `sample_survey.kml` | Polygon, line and point in a folder, with `ExtendedData` | WGS84 (KML always is) | `COMPLETED`: 2 × `MEASURED`, 1 × `NOT_APPLICABLE` (the point) |
 | `sample_missing_crs.zip` | The same parcels without `.prj` | Unknown | `COMPLETED`, 3 × `UNKNOWN_CRS`; with `source_crs=EPSG:32643`, 3 × `MEASURED` |
+| `sample_invalid_geometry.kml` | A valid polygon, an unclosed ring, a self-intersecting (bow-tie) ring, a Placemark with two geometries, and a point | WGS84 | `COMPLETED`: 1 × `MEASURED`, 2 × `INVALID_GEOMETRY` (`RING_NOT_CLOSED`, `INVALID_GEOMETRY`), 1 × `UNSUPPORTED_GEOMETRY` (with a `MULTIPLE_GEOMETRIES` warning), 1 × `NOT_APPLICABLE` |
+| `sample_many_parcels.zip` | 250 parcels of 50 m × 50 m on a grid, `land_use` cycling residential/agricultural/industrial (83 industrial) | EPSG:32643, from the `.prj` | `COMPLETED`, 250 × `MEASURED`; spans several pages of results |
 
 Values from a verified run (independent references in brackets):
 

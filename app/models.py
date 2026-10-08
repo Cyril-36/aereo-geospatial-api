@@ -103,5 +103,10 @@ class FeatureRecord(Base):
     wgs84_geometry: Mapped[dict[str, Any] | None] = mapped_column(JSON)  # only if transformed
     transformation: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     generated_vertices: Mapped[int | None] = mapped_column(Integer)
+    # Added in schema version 3: search and sort keys (see app.services.search).
+    display_name: Mapped[str | None] = mapped_column(Text)
+    sort_name: Mapped[str | None] = mapped_column(Text)
+    search_text: Mapped[str | None] = mapped_column(Text)
+    warning_count: Mapped[int | None] = mapped_column(Integer)
 
     file: Mapped[FileRecord] = relationship(back_populates="features")

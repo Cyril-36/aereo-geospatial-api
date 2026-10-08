@@ -115,6 +115,24 @@ def test_capacity_refuses_counts_near_and_beyond_int64(count):
     assert budget.remaining == 10**6
 
 
+def test_nan_count_is_refused_not_passed_through():
+    # NaN compares False against every limit, so only the explicit finiteness check stops it.
+    budget = VertexBudget(10**6)
+    with pytest.raises(m._Stop) as exc_info:
+        m._check_capacity([np.array([math.nan])], 2, MeasurementLimits(), budget)
+    assert exc_info.value.code == "DENSIFICATION_LIMIT"
+    assert budget.remaining == 10**6
+
+
+@pytest.mark.parametrize("step", [math.nan, 0.0])
+def test_degenerate_configured_step_is_refused(step):
+    # A zero-length segment divided by a zero (or NaN) step gives NaN inserts.
+    geometry = line([(77.0, 13.0), (77.0, 13.0), (77.1, 13.0)])
+    result = run([feature(geometry)], source("EPSG:4326"), MeasurementLimits(max_segment_m=step))[0]
+    assert (result.status, result.reason_code) == (Status.UNSUPPORTED_EXTENT, "DENSIFICATION_LIMIT")
+    assert result.generated_vertices == 0
+
+
 def test_capacity_per_feature_boundary():
     limits = MeasurementLimits(max_vertices_per_feature=10)
     allowed = [np.array([2.0, 4.0])]  # 4 original + 6 inserted = 10

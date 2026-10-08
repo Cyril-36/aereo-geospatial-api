@@ -1,0 +1,3 @@
+200
+application/json
+{"id":"<ID>","filename":"sample_missing_crs.zip","format":"SHAPEFILE","size_bytes":793,"sha256":"ed5e7e97817f4fb9af9c3f705382d09d9d00ae1f76461ffc8d89424bdd78f188","status":"COMPLETED","feature_count":3,"counts":{"UNKNOWN_CRS":3},"crs":null,"crs_status":"UNKNOWN","crs_origin":"NONE","transformation":null,"warnings":[{"code":"CRS_MISSING","message":"No .prj file: the source CRS is unknown."}],"error":null,"created_at":"<TIME>","processed_at":"<TIME>"}

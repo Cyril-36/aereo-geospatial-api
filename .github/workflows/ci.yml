@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.8"
+      - name: Install locked dependencies
+        run: uv sync --frozen
+      - name: Ruff check
+        run: uv run ruff check .
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Tests
+        run: uv run pytest
+
+  docker:
+    name: Docker image (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build --platform linux/amd64 -t aereo-geospatial-api .
+      - name: Start on an empty volume
+        run: |
+          docker run -d --platform linux/amd64 --name api -p 8000:8000 aereo-geospatial-api
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://127.0.0.1:8000/openapi.json && exit 0
+            sleep 1
+          done
+          docker logs api
+          exit 1
+      - name: Smoke test with the sample files
+        shell: bash
+        run: |
+          check() {  # sample file, source_crs ("" for none), expected counts as JSON
+            local extra=()
+            if [ -n "$2" ]; then extra=(-F "source_crs=$2"); fi
+            body=$(curl -sf -F "file=@samples/$1" "${extra[@]}" http://127.0.0.1:8000/api/files/)
+            python3 - "$body" "$3" "$1" <<'PY'
+          import json, sys
+          info, expected = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+          assert info["status"] == "COMPLETED" and info["counts"] == expected, info
+          print(sys.argv[3], "OK", info["counts"])
+          PY
+          }
+          check sample_parcels.zip "" '{"MEASURED": 3}'
+          check sample_survey.kml "" '{"MEASURED": 2, "NOT_APPLICABLE": 1}'
+          check sample_missing_crs.zip "" '{"UNKNOWN_CRS": 3}'
+          check sample_missing_crs.zip EPSG:32643 '{"MEASURED": 3}'
+      - name: Container logs
+        if: always()
+        run: docker logs api

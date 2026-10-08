@@ -1,16 +1,16 @@
 import { start } from "./router.js";
+import { renderUpload } from "./upload.js";
+import { renderResults, renderNotFound } from "./results.js";
 import { h } from "./dom.js";
 
-function placeholder(title) {
-  return (root) => {
-    document.title = `${title} · Survey measurement workspace`;
-    root.append(h("h1", { class: "page-title" }, title));
-  };
+function historyPlaceholder(root) {
+  document.title = "File history · Survey measurement workspace";
+  root.append(h("h1", { class: "page-title" }, "File history"));
 }
 
 start({
-  upload: placeholder("Measure a survey file"),
-  history: placeholder("File history"),
-  results: placeholder("Results"),
-  notfound: placeholder("Page not found"),
+  upload: renderUpload,
+  history: historyPlaceholder,
+  results: renderResults,
+  notfound: renderNotFound,
 });

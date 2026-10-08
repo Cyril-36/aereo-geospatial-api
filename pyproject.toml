@@ -18,6 +18,7 @@ dependencies = [
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
+    "pytest-playwright>=0.9.0",
     "ruff>=0.16.10",
 ]
 
@@ -37,6 +38,7 @@ known-first-party = ["app", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not e2e'"
+markers = ["e2e: browser tests; run with `uv run pytest -m e2e` after `uv run playwright install chromium`"]
 # pyproj's duplicate of what crs.resolve() reports as NON_BEST_TRANSFORMATION.
 filterwarnings = ["ignore:Best transformation is not available:UserWarning"]

@@ -6,7 +6,7 @@ import { clear } from "./dom.js";
 
 let views = {};
 let cleanup = null;
-let firstRender = true;
+let renders = 0;
 
 function match(pathname) {
   if (pathname === "/") return { name: "upload", params: {} };
@@ -28,9 +28,15 @@ function render() {
     else link.removeAttribute("aria-current");
   }
   const view = views[route.name] || views.notfound;
+  renders += 1;
   cleanup = view(root, route.params) || null;
-  if (!firstRender) focusHeading();
-  firstRender = false;
+  if (renders > 1) focusHeading();
+}
+
+// False during the very first page load, so views that render asynchronously keep the
+// browser's default focus then, and move it to their heading after a navigation.
+export function isNavigation() {
+  return renders > 1;
 }
 
 // Moves focus to the view's heading so screen-reader and keyboard users land on the new page.

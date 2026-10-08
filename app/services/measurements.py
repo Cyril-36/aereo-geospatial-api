@@ -15,7 +15,9 @@ Status precedence (the first rule that applies wins):
 7. Conversion to WGS84 fails or leaves the valid range -> TRANSFORM_FAILED
 8. Antimeridian crossing, hemisphere-scale extent, densification budget -> UNSUPPORTED_EXTENT
 9. Projection to the local LAEA fails, or the calculated value or its geodesic reference
-   is not a finite, non-negative number               -> TRANSFORM_FAILED
+   is not a finite, non-negative number               -> TRANSFORM_FAILED;
+   a polygon that is no longer valid once its edges are densified (e.g. a hole that crosses
+   a geodesic edge)                                   -> INVALID_GEOMETRY
 10. Otherwise                                         -> MEASURED
 
 Geometry checks come before CRS checks because they need no CRS: an invalid polygon is reported
@@ -36,7 +38,13 @@ from shapely.errors import GEOSException
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon, shape
 from shapely.geometry.base import BaseGeometry
 
-from app.services.crs import WGS84, ResolvedCrs, apply_override, resolve
+from app.services.crs import (
+    WGS84,
+    ResolvedCrs,
+    apply_override,
+    data_area_of_interest,
+    resolve,
+)
 from app.services.dataset import Dataset, RawFeature, iter_positions, warning
 
 GEOD = Geod(ellps="WGS84")
@@ -160,7 +168,11 @@ def measure_dataset(
     """Measure every feature. Raises IngestionError only for file-level CRS errors
     (INVALID_SOURCE_CRS, CRS_CONFLICT); everything else is a per-feature status."""
     limits = limits or MeasurementLimits()
-    resolved = resolve(apply_override(dataset.source_crs, source_crs_override))
+    source = apply_override(dataset.source_crs, source_crs_override)
+    resolved = resolve(source)
+    area = data_area_of_interest(dataset, resolved)
+    if area is not None:
+        resolved = resolve(source, area)  # choose the datum operation for where the data is
     original = sum(
         sum(1 for _ in iter_positions(f.geometry)) for f in dataset.features if f.geometry
     )
@@ -278,6 +290,15 @@ def _measure(
             Status.TRANSFORM_FAILED,
             "LAEA_PROJECTION_FAILED",
             "Projection to the local equal-area CRS produced non-finite coordinates.",
+        )
+    if kind in AREA_TYPES and not projected.is_valid:
+        # Validity was checked on the source vertices; edges that follow geodesics (or the
+        # projection) can still make the measured polygon invalid, e.g. a hole near an edge.
+        raise _Stop(
+            Status.INVALID_GEOMETRY,
+            "INVALID_AFTER_DENSIFICATION",
+            "The polygon is invalid once its edges are densified: "
+            f"{shapely.is_valid_reason(projected)}",
         )
 
     # 10. Measure and compute the geodesic reference; only then charge the vertex budget and

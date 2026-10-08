@@ -100,6 +100,10 @@ def test_horizontal_extreme_line_is_never_measured():
     result = run([feature(line([(0, 0), (1e24, 0)]))], source("EPSG:3857"))[0]
     assert result.status != Status.MEASURED
     assert result.length_m is None and result.generated_vertices == 0
+    # With the projection-domain guard both platforms stop it as a failed conversion: the
+    # range check on arm64, the round trip (no longitude projects to x = 1e24) on x86-64.
+    assert result.status == Status.TRANSFORM_FAILED
+    assert result.reason_code in {"COORDINATES_OUT_OF_RANGE", "OUTSIDE_PROJECTION_DOMAIN"}
 
 
 @pytest.mark.parametrize(

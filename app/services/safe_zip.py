@@ -5,11 +5,13 @@ Shapefile dataset are extracted, under fixed generated names, so no archive path
 used as a filesystem path. ``ZipFile.extractall`` is never used.
 """
 
+import lzma
 import posixpath
 import re
 import stat
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -154,7 +156,15 @@ def extract_shapefile(
                         if written_total > limits.max_expanded_bytes:
                             raise too_big
                         out.write(chunk)
-            except (zipfile.BadZipFile, EOFError, OSError, NotImplementedError) as exc:
+            # zlib/lzma errors: a corrupt compressed stream inside an intact archive.
+            except (
+                zipfile.BadZipFile,
+                EOFError,
+                OSError,
+                NotImplementedError,
+                zlib.error,
+                lzma.LZMAError,
+            ) as exc:
                 raise IngestionError(
                     "INVALID_ZIP", f"Archive entry could not be read: {info.filename!r}"
                 ) from exc

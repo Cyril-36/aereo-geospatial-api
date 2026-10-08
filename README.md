@@ -322,10 +322,18 @@ File-processing flow:
 2. **The CRS is resolved, never guessed.** KML is WGS84 by specification. A Shapefile's CRS comes from its
    `.prj` or from `source_crs`. Without either, the features are `UNKNOWN_CRS` and get no numbers.
 3. **Conversion to WGS84.** pyproj's `TransformerGroup` (with `always_xy=True`, so longitude comes first)
-   picks the best transformation that is available offline; PROJ network access is disabled. The
-   operation and its stated accuracy are recorded. `NON_BEST_TRANSFORMATION` means a better operation
-   needs grid files that are not installed. `TRANSFORMATION_ACCURACY_UNKNOWN` means a datum change has
-   no stated accuracy. Datum errors move geometry; they barely change its size.
+   picks the best transformation that is available offline; PROJ network access is disabled.
+   - The operation is chosen for where the data is: the file's longitude/latitude extent is passed as
+     an area of interest, so NAD27 data in California gets a US operation, not a Canadian one.
+   - The operation and its stated accuracy are recorded.
+   - `NON_BEST_TRANSFORMATION`: a better operation needs grid files that are not installed.
+   - `TRANSFORMATION_ACCURACY_UNKNOWN`: a datum change has no stated accuracy (e.g. a ballpark
+     fallback).
+   - `TRANSFORMATION_OUTSIDE_AREA_OF_USE`: the selected operation does not cover all of the data.
+
+   A datum error mainly moves the geometry. For a local feature, a shift of tens of metres changes
+   its measured size very little, but positions (and the returned WGS84 geometry) can be off by the
+   operation's stated accuracy or more.
 4. **Guards.** These are checked before measuring, and again after densification:
    - geometry crossing the 180° meridian;
    - a vertex more than 90° of arc from the feature's centre;
@@ -368,7 +376,7 @@ hundreds of kilometres can be off by about 0.1 % or more, which the geodesic che
 | `UNKNOWN_CRS` | The file declares no CRS and none was supplied |
 | `CRS_UNSUPPORTED` | The CRS cannot be parsed or converted to WGS84 (e.g. a local engineering CRS) |
 | `EMPTY_GEOMETRY` | The feature has no coordinates |
-| `INVALID_GEOMETRY` | Malformed or invalid geometry (e.g. a self-intersecting polygon, an unclosed ring); it is reported, never repaired |
+| `INVALID_GEOMETRY` | Malformed or invalid geometry (e.g. a self-intersecting polygon, an unclosed ring, or a polygon that becomes invalid once its edges follow geodesics); it is reported, never repaired |
 | `UNSUPPORTED_GEOMETRY` | A type that is not measured, e.g. a mixed GeometryCollection or `gx:Track` |
 | `UNSUPPORTED_EXTENT` | Crosses the 180° meridian, spans a hemisphere, or exceeds the densification limits |
 | `TRANSFORM_FAILED` | Conversion failed, a coordinate is outside the projection's domain, or the result is not a finite, non-negative number |
@@ -443,7 +451,7 @@ Every non-`MEASURED` feature has a `reason_code` and a human-readable `reason`.
 uv run pytest
 ```
 
-The suite (317 tests) uses real files throughout: Shapefiles written with Fiona, real KML documents, and
+The suite (329 tests) uses real files throughout: Shapefiles written with Fiona, real KML documents, and
 a database dump written by the first release for the migration tests. Measured values are compared with
 independent references rather than with the code under test:
 

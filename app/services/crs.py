@@ -11,12 +11,14 @@ import warnings
 from dataclasses import dataclass, field
 from functools import lru_cache
 
+import numpy as np
 from pyproj import CRS, Transformer, network
+from pyproj.aoi import AreaOfInterest
 from pyproj.exceptions import CRSError, ProjError
 from pyproj.transformer import TransformerGroup
 
 from app.errors import IngestionError
-from app.services.dataset import SourceCrs
+from app.services.dataset import Dataset, SourceCrs, iter_positions
 from app.services.dataset import warning as feature_warning
 
 # Never download transformation grids at request time; results must not depend on the network.
@@ -123,7 +125,54 @@ def _same_datum_as_wgs84(crs: CRS) -> bool:
     return geodetic is not None and same_crs(geodetic, CRS.from_epsg(4326))
 
 
-def resolve(source: SourceCrs) -> ResolvedCrs:
+def _covers(area, aoi: AreaOfInterest) -> bool:
+    """Whether an operation's area of use contains the area of interest."""
+    if area is None:
+        return True
+    if not area.south <= aoi.south_lat_degree <= aoi.north_lat_degree <= area.north:
+        return False
+    west, east = aoi.west_lon_degree, aoi.east_lon_degree
+    if area.west <= area.east:
+        return area.west <= west <= east <= area.east
+    return west >= area.west or east <= area.east  # area of use crossing the antimeridian
+
+
+def data_area_of_interest(dataset: Dataset, resolved: ResolvedCrs) -> AreaOfInterest | None:
+    """Longitude/latitude extent of the data, in the source datum, for choosing a datum
+    operation valid where the data is. None when it cannot be determined."""
+    if resolved.status != "OK":
+        return None
+    points = [
+        p[:2]
+        for f in dataset.features
+        if f.geometry
+        for p in iter_positions(f.geometry)
+        if len(p) >= 2 and all(isinstance(v, (int, float)) for v in p[:2])
+    ]
+    if not points:
+        return None
+    xy = np.asarray(points, dtype=float)
+    if resolved.is_geographic:
+        lon, lat = xy[:, 0], xy[:, 1]
+    else:
+        lon, lat = resolved.to_geodetic.transform(xy[:, 0], xy[:, 1], errcheck=False)
+        lon, lat = np.asarray(lon), np.asarray(lat)
+    ok = np.isfinite(lon) & np.isfinite(lat) & (np.abs(lon) <= 180) & (np.abs(lat) <= 90)
+    if not ok.any():
+        return None
+    lon, lat = lon[ok], lat[ok]
+    pad = 1e-7  # a single point still needs a non-empty box
+    return AreaOfInterest(
+        west_lon_degree=max(float(lon.min()) - pad, -180.0),
+        south_lat_degree=max(float(lat.min()) - pad, -90.0),
+        east_lon_degree=min(float(lon.max()) + pad, 180.0),
+        north_lat_degree=min(float(lat.max()) + pad, 90.0),
+    )
+
+
+def resolve(source: SourceCrs, area_of_interest: AreaOfInterest | None = None) -> ResolvedCrs:
+    """Prepare a CRS for measurement. With ``area_of_interest`` (the data's extent), the
+    datum operation is chosen for that area rather than by global ranking alone."""
     if source.status == "UNKNOWN":
         return ResolvedCrs(
             source, "UNKNOWN_CRS", "CRS_MISSING", "The source CRS is unknown; nothing is assumed."
@@ -145,7 +194,7 @@ def resolve(source: SourceCrs) -> ResolvedCrs:
         )
 
     try:
-        group = TransformerGroup(crs, WGS84, always_xy=True)
+        group = TransformerGroup(crs, WGS84, always_xy=True, area_of_interest=area_of_interest)
     except ProjError as exc:
         return ResolvedCrs(
             source, "CRS_UNSUPPORTED", "NO_TRANSFORMATION", f"PROJ error: {exc}", crs=crs
@@ -168,6 +217,15 @@ def resolve(source: SourceCrs) -> ResolvedCrs:
                 "NON_BEST_TRANSFORMATION",
                 f"Best transformation '{best.name}' needs grids that are not installed; using "
                 f"'{transformer.description}' (accuracy {stated}).",
+            )
+        )
+    if area_of_interest is not None and not _covers(transformer.area_of_use, area_of_interest):
+        area_name = transformer.area_of_use.name if transformer.area_of_use else "unknown"
+        warnings.append(
+            feature_warning(
+                "TRANSFORMATION_OUTSIDE_AREA_OF_USE",
+                f"Transformation '{transformer.description}' is defined for {area_name}; the "
+                "data extends outside that area, so positions may be less accurate than stated.",
             )
         )
     if accuracy is None and not _same_datum_as_wgs84(crs):

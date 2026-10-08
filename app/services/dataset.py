@@ -95,6 +95,8 @@ def iter_positions(geometry: dict[str, Any]):
     stack = [geometry["coordinates"]]
     while stack:
         item = stack.pop()
+        if not isinstance(item, (list, tuple)):
+            continue  # malformed input is reported by the measurement stage, not here
         if item and isinstance(item[0], (int, float)):
             yield item
         else:

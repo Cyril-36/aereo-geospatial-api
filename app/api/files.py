@@ -106,11 +106,11 @@ def upload_file(
         try:
             processed = process(Path(stored.path), file_format, settings, override)
         except IngestionError as exc:
-            _mark_failed(db, record, exc.code, exc.message)
+            _mark_failed(db, file_id, exc.code, exc.message)
             logger.info("file %s failed: %s", file_id, exc.code)
             raise ApiError.from_ingestion(exc, file_id) from exc
         except Exception:
-            _mark_failed(db, record, "INTERNAL_ERROR", "Unexpected error while processing.")
+            _mark_failed(db, file_id, "INTERNAL_ERROR", "Unexpected error while processing.")
             raise
 
     # Every feature and the COMPLETED status are committed in a single transaction.
@@ -122,11 +122,11 @@ def upload_file(
     except InconsistentResultError:
         # Fail closed: an internally contradictory result is never stored.
         logger.exception("file %s: inconsistent measurement result", file_id)
-        _mark_failed(db, record, "INCONSISTENT_RESULT", "Measurement results were inconsistent.")
+        _mark_failed(db, file_id, "INCONSISTENT_RESULT", "Measurement results were inconsistent.")
         raise
     except Exception:
         logger.exception("file %s: storing results failed", file_id)
-        _mark_failed(db, record, "PERSISTENCE_FAILED", "Results could not be stored.")
+        _mark_failed(db, file_id, "PERSISTENCE_FAILED", "Results could not be stored.")
         raise
 
     logger.info(
@@ -136,10 +136,13 @@ def upload_file(
     return file_info(record)
 
 
-def _mark_failed(db: Session, record: FileRecord, code: str, message: str) -> None:
+def _mark_failed(db: Session, file_id: str, code: str, message: str) -> None:
     """Record a failure without partial results. Never raises: the original error matters
-    more, and a row left PROCESSING is marked INTERRUPTED at the next start."""
-    file_id = record.id
+    more, and a row left PROCESSING is marked INTERRUPTED at the next start.
+
+    Takes the id as a plain string: after a failed flush the ORM object's attributes are
+    expired, and reading them on a session awaiting rollback raises.
+    """
     try:
         db.rollback()
         db.expunge_all()

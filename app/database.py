@@ -10,9 +10,13 @@ class Base(DeclarativeBase):
 
 
 def make_engine(url: str) -> Engine:
+    # hide_parameters: SQLAlchemy otherwise embeds bound values (feature attributes, geometry)
+    # in error messages, which then reach the logs.
     if not url.startswith("sqlite"):
-        return create_engine(url)
-    engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
+        return create_engine(url, hide_parameters=True)
+    engine = create_engine(
+        url, hide_parameters=True, connect_args={"check_same_thread": False, "timeout": 30}
+    )
 
     @event.listens_for(engine, "connect")
     def _sqlite_connect(dbapi_connection, _record) -> None:

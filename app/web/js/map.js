@@ -67,7 +67,17 @@ export function mountMap(region, { fileId, config, onPick }) {
   function ensureMap() {
     if (map) return true;
     if (!window.L) return false;
-    map = window.L.map(mapEl, { preferCanvas: true, zoomSnap: 0.25, worldCopyJump: false });
+    // Leaflet 1.9.4 can call _redraw synchronously during an update while an earlier
+    // animation frame is pending. Its implementation clears the request ID without
+    // cancelling that frame, so removal cannot cancel it and it draws on a destroyed
+    // canvas. Cancel the pending frame before every redraw on our owned renderer.
+    const Canvas = window.L.Canvas.extend({
+      _redraw() {
+        window.L.Util.cancelAnimFrame(this._redrawRequest);
+        window.L.Canvas.prototype._redraw.call(this);
+      },
+    });
+    map = window.L.map(mapEl, { renderer: new Canvas(), preferCanvas: true, zoomSnap: 0.25, worldCopyJump: false });
     if (config.map_tile_url) {
       window.L.tileLayer(config.map_tile_url, { maxZoom: 19, attribution: OSM_ATTRIBUTION }).addTo(map);
     }

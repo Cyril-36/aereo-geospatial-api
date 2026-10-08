@@ -115,6 +115,31 @@ def test_switching_files_cancels_map_load(page_ok, server):
     assert drawn(page_ok) == [0, 1, 2]
 
 
+def test_navigation_during_queued_canvas_redraw(page_ok, server):
+    opened(page_ok, server, "sample_parcels.zip")
+    page_ok.get_by_role("navigation", name="Main").get_by_role("link", name="File history").click()
+    # Capture the real renderer when results reopen. Leaflet's update event can draw
+    # synchronously while an earlier animation-frame redraw is still queued.
+    page_ok.evaluate("""() => {
+        const onAdd = L.Canvas.prototype.onAdd;
+        L.Canvas.prototype.onAdd = function(map) {
+            window.testCanvas = this;
+            return onAdd.call(this, map);
+        };
+    }""")
+    page_ok.get_by_role("button", name="sample_parcels.zip", exact=True).click()
+    expect(page_ok.locator(STATUS)).to_contain_text("3 of 3")
+    page_ok.evaluate("""() => {
+        window.testCanvas.fire('update');
+        document.querySelector('[data-nav="history"]').click();
+    }""")
+    page_ok.evaluate(
+        "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+    )
+    expect(page_ok.get_by_role("heading", level=1)).to_have_text("File history")
+    assert page_ok.expected_errors == []
+
+
 @pytest.mark.parametrize("server_env", [{"AEREO_MAP_MAX_FEATURES": "1"}])
 def test_unknown_coordinates_also_consume_loading_budget(page_ok, server):
     requests = []
